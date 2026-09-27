@@ -252,7 +252,7 @@ def patch_generic_mk():
         '  DEVICE_VENDOR := COMFAST\n'
         '  DEVICE_MODEL := CF-WA350\n'
         '  DEVICE_PACKAGES := kmod-ath10k-ct ath10k-firmware-qca9888-ct \\\n'
-        '\tkmod-dsa-qca8k kmod-phy-qca83xx cfw-leds -uboot-envtools\n'
+        '\tkmod-dsa-qca8k kmod-phy-qca83xx cfw-leds -swconfig -uboot-envtools\n'
         '  IMAGE_SIZE := 16000k\n'
         'endef\n'
         'TARGET_DEVICES += comfast_cf-wa350\n'
