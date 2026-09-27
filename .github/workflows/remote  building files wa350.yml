@@ -1,20 +1,14 @@
-name: Build COMFAST CF-WA350 (Matrix - Multi-Version)
+name: Remote Build COMFAST CF-WA350 (Matrix - Multi-Version)
 
 on:
   workflow_dispatch:
     inputs:
-      # ---------------------------------------------------------------
-      # Matrix mode toggle
-      # ---------------------------------------------------------------
       enable_matrix:
         description: '⚡ Matrix Mode: build TWO versions in parallel'
         required: false
         default: false
         type: boolean
 
-      # ---------------------------------------------------------------
-      # Primary build (always used)
-      # ---------------------------------------------------------------
       openwrt_branch:
         description: 'Primary: OpenWrt branch'
         required: true
@@ -30,9 +24,6 @@ on:
         default: ''
         type: string
 
-      # ---------------------------------------------------------------
-      # Secondary build (only if Matrix Mode is enabled)
-      # ---------------------------------------------------------------
       openwrt_branch_2:
         description: 'Secondary: OpenWrt branch (used only if Matrix Mode ON)'
         required: false
@@ -48,9 +39,6 @@ on:
         default: ''
         type: string
 
-      # ---------------------------------------------------------------
-      # Shared options (applied to BOTH builds)
-      # ---------------------------------------------------------------
       include_files:
         description: 'Inject custom files from "files" directory'
         required: false
@@ -72,9 +60,6 @@ env:
   TZ: Asia/Riyadh
 
 jobs:
-  # ===========================================================================
-  # Job 1: Prepare the build matrix dynamically from user inputs
-  # ===========================================================================
   prepare:
     runs-on: ubuntu-22.04
     outputs:
@@ -89,7 +74,6 @@ jobs:
           B2="${{ github.event.inputs.openwrt_branch_2 }}"
           P2="${{ github.event.inputs.patch_version_2 }}"
 
-          # Normalize empty patches
           [ -z "$P1" ] && P1=""
           [ -z "$P2" ] && P2=""
 
@@ -98,7 +82,6 @@ jobs:
           echo "Primary       : branch='$B1' patch='$P1'"
           echo "Secondary     : branch='$B2' patch='$P2'"
 
-          # Build label for artifact naming (e.g. "snapshot-latest", "25.12-4")
           if [ -n "$P1" ]; then
             LABEL1="${B1}-${P1}"
           else
@@ -130,16 +113,12 @@ jobs:
           echo "=== Generated matrix ==="
           echo "$MATRIX" | jq .
 
-          # ✅ Use heredoc format for multi-line output
           {
             echo "matrix<<EOF_MATRIX"
             echo "$MATRIX"
             echo "EOF_MATRIX"
           } >> "$GITHUB_OUTPUT"
 
-  # ===========================================================================
-  # Job 2: Build (runs once per matrix entry, in parallel)
-  # ===========================================================================
   build:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -163,9 +142,6 @@ jobs:
         df -h
         du -sh . 2>/dev/null || true
 
-    # -----------------------------------------------------------------------
-    # Resolve branch and version (tag) for THIS matrix entry
-    # -----------------------------------------------------------------------
     - name: Resolve OpenWrt branch and version
       run: |
         BRANCH_INPUT="${{ matrix.branch }}"
@@ -251,9 +227,6 @@ jobs:
         echo "OPENWRT_PATCH_INPUT=$PATCH_INPUT" >> "$GITHUB_ENV"
         echo "OPENWRT_LABEL=${{ matrix.label }}" >> "$GITHUB_ENV"
 
-    # -----------------------------------------------------------------------
-    # Initialize per-slot build log
-    # -----------------------------------------------------------------------
     - name: Initialize build log
       run: |
         echo "=== BUILD LOG (${{ matrix.slot }}) - $(date) ===" > "$LOGFILE"
@@ -275,7 +248,6 @@ jobs:
         git add "$LOGFILE"
         git commit -m "Init ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
 
-        # Retry push (in case the other matrix slot pushed at the same time)
         for attempt in 1 2 3 4 5; do
           git pull --rebase origin main 2>/dev/null || true
           if git push origin main 2>/dev/null; then
@@ -308,9 +280,6 @@ jobs:
         sudo apt clean 2>&1 | tee -a "$LOGFILE"
         sudo rm -rf /var/lib/apt/lists/* 2>&1 | tee -a "$LOGFILE"
 
-    # -----------------------------------------------------------------------
-    # Clone OpenWrt at resolved tag (or branch for snapshot)
-    # -----------------------------------------------------------------------
     - name: Clone OpenWrt source
       run: |
         echo "=== Cloning OpenWrt source ===" | tee -a "$LOGFILE"
@@ -357,9 +326,6 @@ jobs:
           echo "No 'files' directory found." | tee -a "$LOGFILE"
         fi
 
-    # -----------------------------------------------------------------------
-    # Import cfw-leds package
-    # -----------------------------------------------------------------------
     - name: Import cfw-leds package into openwrt/package/utils/
       if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
       run: |
@@ -368,10 +334,6 @@ jobs:
         TARGET_PARENT="openwrt/package/utils"
         TARGET_DIR="$TARGET_PARENT/cfw-leds"
         TMP_DIR="/tmp/cfw-leds-src"
-
-        echo "Repo: $CFW_REPO" | tee -a "$LOGFILE"
-        echo "Target parent: $TARGET_PARENT" | tee -a "$LOGFILE"
-        echo "Expected final path: $TARGET_DIR" | tee -a "$LOGFILE"
 
         rm -rf "$TMP_DIR"
         if git clone --depth 1 "$CFW_REPO" "$TMP_DIR" 2>&1 | tee -a "$LOGFILE"; then
@@ -400,8 +362,6 @@ jobs:
           exit 1
         fi
 
-        find "$TARGET_DIR" -type f -exec ls -lh {} \; 2>&1 | tee -a "$LOGFILE"
-
         chmod -R u+rwX,go+rX "$TARGET_DIR" 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "Makefile" -exec chmod 644 {} \; 2>&1 | tee -a "$LOGFILE"
@@ -417,9 +377,6 @@ jobs:
 
         echo "✅ cfw-leds package import completed." | tee -a "$LOGFILE"
 
-    # -----------------------------------------------------------------------
-    # Import luci-theme-enan-dashboard package (optional)
-    # -----------------------------------------------------------------------
     - name: Import luci-theme-enan-dashboard package into openwrt/package/
       if: ${{ github.event.inputs.attach_theme == 'true' }}
       run: |
@@ -456,8 +413,6 @@ jobs:
           exit 1
         fi
 
-        find "$TARGET_DIR" -type f -exec ls -lh {} \; 2>&1 | tee -a "$LOGFILE"
-
         chmod -R u+rwX,go+rX "$TARGET_DIR" 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "Makefile" -exec chmod 644 {} \; 2>&1 | tee -a "$LOGFILE"
@@ -481,52 +436,26 @@ jobs:
         cd openwrt
         cp .config config-before.txt
 
-        # ---------------------------------------------------------------
-        # Handle theme package config injection
-        # ---------------------------------------------------------------
         if [ "${{ github.event.inputs.attach_theme }}" = "true" ]; then
           echo "=== Injecting CONFIG_PACKAGE_luci-theme-enan-dashboard=y ===" | tee -a "../$LOGFILE"
-          # Remove any existing entries first (to avoid duplicates)
           sed -i '/^CONFIG_PACKAGE_luci-theme-enan-dashboard=/d' .config
           sed -i '/^# CONFIG_PACKAGE_luci-theme-enan-dashboard is not set/d' .config
           echo "CONFIG_PACKAGE_luci-theme-enan-dashboard=y" >> .config
           echo "✅ Injected theme config option." | tee -a "../$LOGFILE"
         fi
 
-        # ---------------------------------------------------------------
-        # Handle cfw-leds package config
-        # When import_cfw_leds is FALSE → force-disable CONFIG_PACKAGE_cfw-leds
-        # ---------------------------------------------------------------
         if [ "${{ github.event.inputs.import_cfw_leds }}" = "false" ]; then
           echo "=== Disabling CONFIG_PACKAGE_cfw-leds in .config ===" | tee -a "../$LOGFILE"
-
-          echo "--- Before modification (any matching lines): ---" | tee -a "../$LOGFILE"
-          grep -nE '^CONFIG_PACKAGE_cfw-leds|^# CONFIG_PACKAGE_cfw-leds is not set' .config | tee -a "../$LOGFILE" || echo "(no matching lines found)" | tee -a "../$LOGFILE"
-
-          # Remove any existing "=y", "=m" or "is not set" line to avoid duplicates
           sed -i '/^CONFIG_PACKAGE_cfw-leds=/d' .config
           sed -i '/^# CONFIG_PACKAGE_cfw-leds is not set/d' .config
-
-          # Append the "is not set" line
           echo "# CONFIG_PACKAGE_cfw-leds is not set" >> .config
-
-          echo "--- After modification: ---" | tee -a "../$LOGFILE"
-          grep -nE '^CONFIG_PACKAGE_cfw-leds|^# CONFIG_PACKAGE_cfw-leds is not set' .config | tee -a "../$LOGFILE" || true
           echo "✅ cfw-leds has been force-disabled in .config" | tee -a "../$LOGFILE"
         else
-          echo "=== cfw-leds import is enabled → leaving .config untouched for CONFIG_PACKAGE_cfw-leds ===" | tee -a "../$LOGFILE"
-          grep -nE '^CONFIG_PACKAGE_cfw-leds|^# CONFIG_PACKAGE_cfw-leds is not set' .config | tee -a "../$LOGFILE" || echo "(no CONFIG_PACKAGE_cfw-leds line in .config)" | tee -a "../$LOGFILE"
+          echo "=== cfw-leds import is enabled → leaving .config untouched ===" | tee -a "../$LOGFILE"
         fi
 
         echo "=== Active options BEFORE defconfig ===" | tee -a "../$LOGFILE"
         grep -E '^CONFIG_.*=[ym]' .config | wc -l | tee -a "../$LOGFILE"
-
-        echo "=== Checking target device BEFORE defconfig ===" | tee -a "../$LOGFILE"
-        if grep -q "CONFIG_TARGET_ath79_generic_DEVICE_comfast_cf-wa350=y" .config; then
-          echo "✅ Target device correctly set BEFORE defconfig." | tee -a "../$LOGFILE"
-        else
-          echo "⚠️ Target device NOT set BEFORE defconfig." | tee -a "../$LOGFILE"
-        fi
 
         echo "=== Running make olddefconfig ===" | tee -a "../$LOGFILE"
         make olddefconfig 2>&1 | tee -a "../$LOGFILE"
@@ -547,23 +476,14 @@ jobs:
           echo "✅ Target device still correctly set AFTER defconfig." | tee -a "../$LOGFILE"
         fi
 
-        # Re-verify cfw-leds state after defconfig (in case defconfig re-enabled it)
         if [ "${{ github.event.inputs.import_cfw_leds }}" = "false" ]; then
-          echo "=== Verifying cfw-leds is still disabled AFTER defconfig ===" | tee -a "../$LOGFILE"
           if grep -qE '^CONFIG_PACKAGE_cfw-leds=y' .config; then
-            echo "⚠️ defconfig re-enabled cfw-leds → forcing it back to 'is not set'" | tee -a "../$LOGFILE"
+            echo "⚠️ defconfig re-enabled cfw-leds → forcing it back" | tee -a "../$LOGFILE"
             sed -i '/^CONFIG_PACKAGE_cfw-leds=/d' .config
             sed -i '/^# CONFIG_PACKAGE_cfw-leds is not set/d' .config
             echo "# CONFIG_PACKAGE_cfw-leds is not set" >> .config
-            echo "✅ Re-disabled cfw-leds after defconfig." | tee -a "../$LOGFILE"
-          else
-            echo "✅ cfw-leds correctly remains disabled." | tee -a "../$LOGFILE"
           fi
         fi
-
-        echo "=== Diff before/after defconfig ===" | tee -a "../$LOGFILE"
-        diff -u <(grep -v '^#' config-before.txt | grep -v '^$' | sort) \
-               <(grep -v '^#' config-after.txt | grep -v '^$' | sort) 2>&1 | tee -a "../$LOGFILE" || true
 
         echo "✅ .config verification completed." | tee -a "../$LOGFILE"
 
@@ -606,28 +526,95 @@ jobs:
       timeout-minutes: 360
 
     - name: List all files in bin/targets/ath79/generic/
+      if: always()
       run: |
         echo "=== Contents of bin/targets/ath79/generic/ ===" | tee -a "$LOGFILE"
         cd openwrt
         if [ -d bin/targets/ath79/generic/ ]; then
           ls -la bin/targets/ath79/generic/ 2>&1 | tee -a "../$LOGFILE"
           find bin/targets/ath79/generic/ -type f -exec ls -lh {} \; 2>&1 | tee -a "../$LOGFILE"
-          if [ -z "$(find bin/targets/ath79/generic/ -name '*.bin' -o -name '*.img' -o -name '*.tar' 2>/dev/null)" ]; then
-            echo "⚠️ No firmware files found. Attempting target/install..." | tee -a "../$LOGFILE"
-            make target/install 2>&1 | tee -a "../$LOGFILE"
-            ls -la bin/targets/ath79/generic/ 2>&1 | tee -a "../$LOGFILE"
-          fi
         else
           echo "❌ Directory bin/targets/ath79/generic/ does not exist!" | tee -a "../$LOGFILE"
         fi
 
+    # =======================================================================
+    # Collect artifacts (images, kernel, dtb, injected files, logs)
+    #   NOTE: This step must run BEFORE cleaning build_dir so we can capture
+    #         kernel / dtb / built objects.
+    # =======================================================================
+    - name: Collect artifacts (images, kernel, dtb, injected files, logs)
+      if: always()
+      run: |
+        set -u
+        echo "=== Collecting artifacts ===" | tee -a "$LOGFILE"
+
+        cd openwrt
+        rm -rf out
+        mkdir -p out/images out/kernel out/dtb out/injected out/logs
+
+        echo "=== images ===" | tee -a "../$LOGFILE"
+        cp -v bin/targets/ath79/generic/*cf-wa350*         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/sha256sums         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/*.manifest         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/config.buildinfo   out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/feeds.buildinfo    out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/version.buildinfo  out/images/ 2>/dev/null || true
+
+        KD="$(ls -d build_dir/target-*/linux-ath79_generic 2>/dev/null | head -1)"
+        echo "=== kernel dir: ${KD:-none} ===" | tee -a "../$LOGFILE"
+        if [ -n "${KD:-}" ]; then
+          for f in vmlinux vmlinuz vmlinux.elf vmlinuz.elf System.map; do
+            [ -e "$KD/$f" ] && cp -v "$KD/$f" out/kernel/ || true
+          done
+          [ -e "$KD/.config" ] && cp -v "$KD/.config" out/kernel/kernel-dot-config || true
+          gzip -9f out/kernel/vmlinux 2>/dev/null || true
+          find build_dir/target-*/ -maxdepth 4 -name '*kernel*.bin' -exec cp -v {} out/kernel/ \; 2>/dev/null || true
+          find "$KD" -name '*cf-wa350*.dtb'  -exec cp -v {} out/dtb/ \; 2>/dev/null || true
+          find "$KD" -name '*cf-wa350*.dts*' -exec cp -v {} out/dtb/ \; 2>/dev/null || true
+          mkdir -p out/dtb/all-built
+          find "$KD" -name '*.dtb' -exec cp {} out/dtb/all-built/ \; 2>/dev/null || true
+        fi
+
+        echo "=== injected / device files as they ended up in the tree ===" | tee -a "../$LOGFILE"
+        cp -v target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts               out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/generic/base-files/etc/board.d/01_leds         out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/generic/base-files/etc/board.d/02_network      out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/image/generic.mk                               out/injected/ 2>/dev/null || true
+        cp -v .config                                                           out/injected/dot-config 2>/dev/null || true
+        [ -e apply_patches.py ] && cp -v apply_patches.py out/injected/ || true
+        [ -d dts ]      && cp -rv dts      out/injected/dts-src      || true
+        [ -d patches ]  && cp -rv patches  out/injected/patches-src  || true
+        [ -d package/utils/cfw-leds ] && cp -rv package/utils/cfw-leds out/injected/cfw-leds || true
+        [ -d package/luci-theme-enan-dashboard ] && cp -rv package/luci-theme-enan-dashboard out/injected/luci-theme-enan-dashboard || true
+
+        # Bring in the build log
+        cp -v "../$LOGFILE" out/logs/ 2>/dev/null || true
+
+        # sha256 of the produced images
+        sha256sum bin/targets/ath79/generic/*cf-wa350* > out/logs/40-sha256.txt 2>/dev/null || true
+
+        echo "=== uImage kernel size (bytes 12..15, big endian) ===" | tee -a "../$LOGFILE"
+        for img in out/images/*cf-wa350-squashfs-sysupgrade.bin; do
+          [ -e "$img" ] || continue
+          printf '%s: ' "$(basename "$img")"
+          od -A d -t u4 -j 12 -N 4 --endian=big "$img" | head -1
+        done | tee out/logs/00-commit.txt
+
+        echo "=== bundle contents ===" | tee -a "../$LOGFILE"
+        find out -type f | sort | sed 's|^|  |' | tee out/logs/50-bundle-list.txt
+        du -sh out/* 2>/dev/null | tee -a out/logs/50-bundle-list.txt
+
+        echo "✅ Artifacts collected into openwrt/out/" | tee -a "../$LOGFILE"
+
     - name: Clean temporary build directories (free space for packaging)
+      if: always()
       run: |
         echo "=== Cleaning build_dir and staging_dir ===" | tee -a "$LOGFILE"
         cd openwrt
         rm -rf build_dir staging_dir 2>&1 | tee -a "../$LOGFILE"
 
     - name: Check disk space after build
+      if: always()
       run: |
         echo "=== Disk space after build ===" | tee -a "$LOGFILE"
         df -h 2>&1 | tee -a "$LOGFILE"
@@ -646,7 +633,6 @@ jobs:
         git add "$LOGFILE"
         git commit -m "Update ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
 
-        # Retry push (handles parallel matrix slots pushing simultaneously)
         for attempt in 1 2 3 4 5; do
           git pull --rebase origin main 2>/dev/null || true
           if git push origin main 2>/dev/null; then
@@ -665,6 +651,20 @@ jobs:
         path: ${{ env.LOGFILE }}
         if-no-files-found: error
 
+    # -----------------------------------------------------------------------
+    # Upload the collected bundle (images + kernel + dtb + injected + logs)
+    # -----------------------------------------------------------------------
+    - name: Upload collected artifact bundle (out/)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cf-wa350-bundle-${{ matrix.label }}-${{ github.sha }}
+        path: openwrt/out/
+        if-no-files-found: warn
+
+    # -----------------------------------------------------------------------
+    # Upload the raw firmware files (kept for compatibility / quick access)
+    # -----------------------------------------------------------------------
     - name: Upload firmware and all build artifacts
       if: always()
       uses: actions/upload-artifact@v4
