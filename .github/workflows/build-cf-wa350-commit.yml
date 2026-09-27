@@ -24,7 +24,7 @@
 #                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
 #    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
 # ============================================================================
-name: Remote Build COMFAST (Commit / Matrix)
+name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
 on:
   workflow_dispatch:
@@ -56,9 +56,19 @@ on:
         default: false
         type: boolean
       inject_dts:
-        description: '🌳 حقن dts/qca9563_comfast_cf-wa350.dts من هذا المستودع فوق الشجرة'
+        description: '🌳 حقن DTS من هذا المستودع فوق الشجرة'
         required: false
         default: true
+        type: boolean
+      dts_file:
+        description: '🌳 ملف الـ DTS المحقون (legacy افتراضياً؛ للتجربة الصريحة: dts/qca9563_comfast_cf-wa350-explicit-mdio.dts)'
+        required: false
+        default: 'dts/qca9563_comfast_cf-wa350.dts'
+        type: string
+      allow_known_bad_combo:
+        description: '☠️ اسمح بتوليفة explicit-mdio بلا 731 (بناء شاهد سلبي متعمد — صورة حلقة إقلاع؛ للوحات التجارب فقط)'
+        required: false
+        default: false
         type: boolean
       include_patch_731:
         description: '🩹 استيراد patches/731-*.patch من building-helper (لازم ONLY لمتغير explicit-mdio؛ legacy لا يحتاجه)'
@@ -336,9 +346,11 @@ jobs:
       if: ${{ github.event.inputs.inject_dts == 'true' }}
       run: |
         set -u
-        SRC="dts/qca9563_comfast_cf-wa350.dts"
+        SRC="${{ github.event.inputs.dts_file }}"
+        [ -n "$SRC" ] || SRC="dts/qca9563_comfast_cf-wa350.dts"
         DST="openwrt/target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts"
         [ -f "$SRC" ] || { echo "❌ $SRC غير موجود في هذا المستودع"; exit 1; }
+        echo "DTS source file: $SRC" | tee -a "$LOGFILE"
         cp -v "$SRC" "$DST" 2>&1 | tee -a "$LOGFILE"
         SHA=$(sha256sum "$DST" | cut -d' ' -f1)
         INT=$(grep -c 'phy-mode = "internal"' "$DST" || true)
@@ -353,9 +365,16 @@ jobs:
         else
           VARIANT="UNKNOWN"
         fi
+        case "$SHA" in
+          1544a5482fabf497*) KNOWN="known: INTERNAL-LEGACY canonical (هدف PR #25040)" ;;
+          a755306340109abe*) KNOWN="known: INTERNAL+MDIO-CHILD canonical (تتطلب 731)" ;;
+          c7cd13705d797229*) KNOWN="known: EXTERNAL-MDIO (رأس الـ PR الحالي)" ;;
+          *) KNOWN="UNKNOWN sha — تحقق من التصنيف يدوياً" ;;
+        esac
         {
         echo "=== DTS identity ==="
-        echo "sha256  : $SHA"
+        echo "source  : $SRC"
+        echo "sha256  : $SHA  ($KNOWN)"
         echo "variant : $VARIANT  (internal:$INT phy-handle:$PH mdio-child:$MD)"
         } | tee -a "$LOGFILE"
         echo "DTS_SHA=$SHA"       >> "$GITHUB_ENV"
@@ -366,9 +385,16 @@ jobs:
             echo "❌ لا أستطيع تصنيف الـ DTS — أوقف قبل إضاعة ساعات البناء"; exit 1 ;;
           "INTERNAL+MDIO-CHILD")
             if [ "$P731" != "true" ]; then
-              echo "❌ DTS بعقدة mdio ابنة (عناوين PHY داخلية 0/1) بلا include_patch_731"
-              echo "   = توليفة حلقة الإقلاع المعروفة (ar8216 + 730 فوق qca8k MDIO master)."
-              echo "   فعّل include_patch_731 أو استعمل نسخة legacy (بلا عقدة mdio)."; exit 1
+              if [ "${{ github.event.inputs.allow_known_bad_combo }}" = "true" ]; then
+                echo "☠️☠️ بناء شاهد سلبي متعمد: explicit-mdio بلا 731."
+                echo "   الصورة الناتجة يُتوقع أن تدخل حلقة إقلاع — لا تومضها إلا على لوحة"
+                echo "   تجربية (B) مع طريق استرجاع مؤكد (u-boot recovery 192.168.1.1)."
+              else
+                echo "❌ DTS بعقدة mdio ابنة (عناوين PHY داخلية 0/1) بلا include_patch_731"
+                echo "   = توليفة حلقة الإقلاع المعروفة (ar8216 + 730 فوق qca8k MDIO master)."
+                echo "   فعّل include_patch_731، أو استعمل نسخة legacy، أو (لشاهد سلبي متعمد)"
+                echo "   فعّل allow_known_bad_combo."; exit 1
+              fi
             fi ;;
           "INTERNAL-LEGACY")
             if [ "$P731" = "true" ]; then
