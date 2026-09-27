@@ -18,6 +18,18 @@ delete wireless.radio1.disabled
 set network.lan.proto='static'
 set network.lan.ipaddr='192.168.1.1'
 set network.lan.netmask='255.255.255.0'
+
+
+# dnsmasq: DNS forwarder only (the upstream gateway does not serve DNS here)
+uci set dhcp.@dnsmasq[0].noresolv='1'
+uci -q delete dhcp.@dnsmasq[0].server
+uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
+uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
+
+#uci -q delete system.@button[0]
+uci commit system
+uci commit dhcp
+
 EOF
 
 uci -q commit wireless
