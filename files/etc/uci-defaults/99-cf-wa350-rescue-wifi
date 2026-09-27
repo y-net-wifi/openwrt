@@ -26,7 +26,18 @@ uci -q delete dhcp.@dnsmasq[0].server
 uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
 uci add_list dhcp.@dnsmasq[0].server='1.1.1.1'
 
-#uci -q delete system.@button[0]
+
+# --- 4. System & Hostname Configuration ---
+uci set system.@system[0].hostname='COMFAST-WA350'
+uci set system.@system[0].notes='Haddad Inc - Developed by Eng. Salah'
+uci set system.@system[0].zonename='Asia/Aden'
+uci set system.@system[0].timezone='<+03>-3'
+uci set system.@system[0].log_proto='udp'
+uci set system.@system[0].conloglevel='8'
+uci set system.@system.cronloglevel='5' 2>/dev/null || uci set system.@system[0].cronloglevel='5'
+
+uci -q del system.ntp.enabled
+uci -q del system.ntp.enable_server
 uci commit system
 uci commit dhcp
 
@@ -34,6 +45,6 @@ EOF
 
 uci -q commit wireless
 uci -q commit network
-
+uci commit
 logger -t rescue-wifi "WA350 rescue WiFi enabled (diagnostic build)"
 exit 0
