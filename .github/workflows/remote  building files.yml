@@ -1,4 +1,4 @@
-name: Remote Build COMFAST CF-WA350 (Matrix - Multi-Version)
+name: Remote Build (Matrix - Multi-Version)
 
 on:
   workflow_dispatch:
