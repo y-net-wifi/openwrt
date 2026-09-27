@@ -364,7 +364,7 @@ jobs:
       if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
       run: |
         echo "=== Importing cfw-leds package ===" | tee -a "$LOGFILE"
-        CFW_REPO="https://github.com/haddad2inc/cfw-leds.git"
+        CFW_REPO="https://github.com/haddad2inc/building-helper.git"
         TARGET_PARENT="openwrt/package/utils"
         TARGET_DIR="$TARGET_PARENT/cfw-leds"
         TMP_DIR="/tmp/cfw-leds-src"
@@ -424,7 +424,7 @@ jobs:
       if: ${{ github.event.inputs.attach_theme == 'true' }}
       run: |
         echo "=== Importing luci-theme-enan-dashboard package ===" | tee -a "$LOGFILE"
-        THEME_REPO="https://github.com/haddad2inc/cfw-leds.git"
+        THEME_REPO="https://github.com/haddad2inc/building-helper.git"
         TARGET_PARENT="openwrt/package"
         TARGET_DIR="$TARGET_PARENT/luci-theme-enan-dashboard"
         TMP_DIR="/tmp/cfw-theme-src"
