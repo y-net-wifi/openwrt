@@ -13,10 +13,8 @@ LEDS_FILE = (
     f"{BASE}/target/linux/ath79/generic/base-files/etc/board.d/01_leds"
 )
 GENERIC_MK = f"{BASE}/target/linux/ath79/image/generic.mk"
-#DTS_SRC = "dts/qca9563_comfast_cf-wa350.dts"
-#DTS_DST = f"{BASE}/target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts"
-DTS_SRC = "dts/qca9563_comfast_cf-wa350-internal-mdio.dts"
-DTS_DST = f"{BASE}/target/linux/ath79/dts/qca9563_comfast_cf-wa350-internal-mdio.dts"
+DTS_SRC = "dts/qca9563_comfast_cf-wa350.dts"
+DTS_DST = f"{BASE}/target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts"
 
 
 # ---------------------------------------------------------------------------
