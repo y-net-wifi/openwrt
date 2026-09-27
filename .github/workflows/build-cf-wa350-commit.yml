@@ -1,0 +1,641 @@
+# ============================================================================
+#  build-cf-wa350-commit.yml — Remote Build COMFAST CF-WA350
+#                              (Commit-pinned / Matrix Multi-Version)
+#
+#  ماذا يضيف على الـ workflow الحالي:
+#    1) وضع «commit»: بناء من SHA محدد (افتراضياً رأس PR #25040
+#       949b9f785c85 من haddad2inc/openwrt) أو من أي كوميت عام
+#       (رسمي/فرع) — مع تحقق أن HEAD المطابق هو المطلوب فعلاً.
+#    2) خيار inject_dts: حقن dts/qca9563_comfast_cf-wa350.dts من هذا
+#       المستودع (y-net-wifi/openwrt) فوق نسخة الشجرة + تصنيف المتغير
+#       (INTERNAL-LEGACY / INTERNAL+MDIO-CHILD / EXTERNAL-MDIO) وبوابات
+#       تمنع التوليفات القاتلة قبل ضياع 3 ساعات بناء.
+#    3) خيار include_patch_731: استيراد الرقعة من building-helper/patches
+#       إلى target/linux/ath79/patches-6.* (يكتشف المجلد تلقائياً) مع
+#       بوابة ترفض النسخة المعطوبة (&mdio_bus_type غير مُصدَّر ⇒ فشل تصريف).
+#    4) بوابة cfw-leds: ترفض النسخة القديمة بأسماء ext_wan (شرطة سفلية).
+#    5) بطاقة هوية IDENTITY.txt تُجمع في out/logs/00-identity.txt —
+#       هوية البناء تُقرأ منها لا من اسم التشغيل ولا من banner التاريخ.
+#
+#  التوليفات النموذجية:
+#    أ) صورة الـ PR النهائية  : source_mode=commit (رأس PR) + inject_dts=✔ (legacy)
+#                               + include_patch_731=✘ + import_cfw_leds=✔
+#    ب) تجربة الصريح+731       : source_mode=commit + inject_dts=✔ (ارفع نسخة
+#                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
+#    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
+# ============================================================================
+name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_mode:
+        description: '🎯 المصدر: commit = SHA محدد | branch = فرع/وسم رسمي (كالقديم)'
+        required: true
+        default: 'commit'
+        type: choice
+        options:
+          - commit
+          - branch
+      source_repo:
+        description: 'commit mode: من أي مستودع يُجلب الكوميت'
+        required: false
+        default: 'pr-fork'
+        type: choice
+        options:
+          - pr-fork      # https://github.com/haddad2inc/openwrt.git
+          - official     # https://git.openwrt.org/openwrt/openwrt.git
+      openwrt_commit:
+        description: 'commit mode: الـ SHA (افتراضي = رأس PR #25040)'
+        required: false
+        default: '949b9f785c85b32c8daa3acfb9ccd01ce221cae1'
+        type: string
+      run_apply_patches:
+        description: 'تشغيل apply_patches.py (مطلوب إذا كان الكوميت لا يحوي ملفات الجهاز — مثلاً main خام؛ في وضع branch يعمل دائماً)'
+        required: false
+        default: false
+        type: boolean
+      inject_dts:
+        description: '🌳 حقن dts/qca9563_comfast_cf-wa350.dts من هذا المستودع فوق الشجرة'
+        required: false
+        default: true
+        type: boolean
+      include_patch_731:
+        description: '🩹 استيراد patches/731-*.patch من building-helper (لازم ONLY لمتغير explicit-mdio؛ legacy لا يحتاجه)'
+        required: false
+        default: false
+        type: boolean
+      openwrt_branch:
+        description: 'branch mode — Primary: OpenWrt branch'
+        required: false
+        default: 'snapshot'
+        type: choice
+        options:
+          - 'snapshot'
+          - '24.10'
+          - '25.12'
+      patch_version:
+        description: 'branch mode — Primary: Patch version (empty = latest)'
+        required: false
+        default: ''
+        type: string
+      openwrt_branch_2:
+        description: 'branch mode — Secondary branch (مع enable_matrix فقط)'
+        required: false
+        default: '25.12'
+        type: choice
+        options:
+          - 'snapshot'
+          - '24.10'
+          - '25.12'
+      patch_version_2:
+        description: 'branch mode — Secondary patch version'
+        required: false
+        default: ''
+        type: string
+      enable_matrix:
+        description: '⚡ Matrix: بناء نسختين بالتوازي (branch mode فقط — يُتجاهل في commit mode)'
+        required: false
+        default: false
+        type: boolean
+      include_files:
+        description: 'Inject custom files from "files" directory'
+        required: false
+        default: false
+        type: boolean
+      import_cfw_leds:
+        description: 'Import cfw-leds package from building-helper (بوابة ترفض النسخة القديمة)'
+        required: false
+        default: true
+        type: boolean
+      attach_theme:
+        description: 'Import luci-theme-enan-dashboard and enable it in .config'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REPO_URL_OFFICIAL: https://git.openwrt.org/openwrt/openwrt.git
+  REPO_URL_FORK: https://github.com/haddad2inc/openwrt.git
+  HELPER_REPO: https://github.com/haddad2inc/building-helper.git
+  TZ: Asia/Riyadh
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Generate build matrix
+        id: set-matrix
+        run: |
+          MODE="${{ github.event.inputs.source_mode }}"
+          COMMIT_IN="${{ github.event.inputs.openwrt_commit }}"
+          if [ "$MODE" = "commit" ]; then
+            if ! echo "$COMMIT_IN" | grep -qE '^[0-9a-fA-F]{7,40}$'; then
+              echo "❌ openwrt_commit ليس SHA صالحاً: '$COMMIT_IN'"; exit 1
+            fi
+            SHORT=$(echo "$COMMIT_IN" | cut -c1-12)
+            if [ "${{ github.event.inputs.enable_matrix }}" = "true" ]; then
+              echo "⚠️ enable_matrix متجاهَل في وضع commit (بناء واحد فقط)."
+            fi
+            MATRIX=$(jq -n --arg s "$SHORT" \
+              '{include:[{slot:"commit",branch:"",patch:"",label:$s}]}')
+            echo "=== Matrix (commit mode) ==="; echo "$MATRIX" | jq .
+          else
+            ENABLE_MATRIX="${{ github.event.inputs.enable_matrix }}"
+            B1="${{ github.event.inputs.openwrt_branch }}"
+            P1="${{ github.event.inputs.patch_version }}"
+            B2="${{ github.event.inputs.openwrt_branch_2 }}"
+            P2="${{ github.event.inputs.patch_version_2 }}"
+            if [ -n "$P1" ]; then LABEL1="${B1}-${P1}"; else LABEL1="${B1}-latest"; fi
+            if [ "$ENABLE_MATRIX" = "true" ]; then
+              if [ -n "$P2" ]; then LABEL2="${B2}-${P2}"; else LABEL2="${B2}-latest"; fi
+              MATRIX=$(jq -n \
+                --arg b1 "$B1" --arg p1 "$P1" --arg l1 "$LABEL1" \
+                --arg b2 "$B2" --arg p2 "$P2" --arg l2 "$LABEL2" \
+                '{include:[
+                  {slot:"primary",branch:$b1,patch:$p1,label:$l1},
+                  {slot:"secondary",branch:$b2,patch:$p2,label:$l2}
+                ]}')
+            else
+              MATRIX=$(jq -n --arg b1 "$B1" --arg p1 "$P1" --arg l1 "$LABEL1" \
+                '{include:[{slot:"primary",branch:$b1,patch:$p1,label:$l1}]}')
+            fi
+            echo "=== Matrix (branch mode) ==="; echo "$MATRIX" | jq .
+          fi
+          { echo "matrix<<EOF_MATRIX"; echo "$MATRIX"; echo "EOF_MATRIX"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    permissions:
+      contents: write
+    env:
+      LOGFILE: build-${{ matrix.slot }}.log
+
+    steps:
+    - name: Checkout your repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check disk space before build
+      run: |
+        echo "=== Disk space before build (${{ matrix.slot }}) ==="; df -h
+
+    - name: Resolve source (commit or branch/tag)
+      run: |
+        MODE="${{ github.event.inputs.source_mode }}"
+        echo "SOURCE_MODE=$MODE" >> "$GITHUB_ENV"
+        if [ "$MODE" = "commit" ]; then
+          COMMIT_IN="${{ github.event.inputs.openwrt_commit }}"
+          case "${{ github.event.inputs.source_repo }}" in
+            pr-fork)  SEL="$REPO_URL_FORK" ;;
+            official) SEL="$REPO_URL_OFFICIAL" ;;
+            *) echo "❌ source_repo غير معروف"; exit 1 ;;
+          esac
+          echo "OPENWRT_REPO=$SEL"        >> "$GITHUB_ENV"
+          echo "OPENWRT_COMMIT=$COMMIT_IN" >> "$GITHUB_ENV"
+          echo "OPENWRT_TAG="              >> "$GITHUB_ENV"
+          echo "OPENWRT_REF=commit:$COMMIT_IN" >> "$GITHUB_ENV"
+          echo "OPENWRT_LABEL=${{ matrix.label }}" >> "$GITHUB_ENV"
+          echo "=== commit mode ==="
+          echo "Repo  : $SEL"
+          echo "Commit: $COMMIT_IN"
+        else
+          BRANCH_INPUT="${{ matrix.branch }}"
+          PATCH_INPUT="${{ matrix.patch }}"
+          case "$BRANCH_INPUT" in
+            snapshot) REF="master"; SERIES="" ;;
+            24.10)    REF="openwrt-24.10"; SERIES="24.10" ;;
+            25.12)    REF="openwrt-25.12"; SERIES="25.12" ;;
+            *) echo "❌ Unknown branch '$BRANCH_INPUT'"; exit 1 ;;
+          esac
+          if [ "$BRANCH_INPUT" = "snapshot" ]; then
+            TAG=""
+          elif [ -n "$PATCH_INPUT" ]; then
+            if echo "$PATCH_INPUT" | grep -q '\.'; then TAG="v${PATCH_INPUT}"
+            else TAG="v${SERIES}.${PATCH_INPUT}"; fi
+          else
+            LATEST_TAG=$(git ls-remote --tags "$REPO_URL_OFFICIAL" "v${SERIES}.*" 2>/dev/null \
+              | awk -F'refs/tags/' '{print $2}' | grep -v '\^{}' \
+              | grep -E "^v${SERIES}\.[0-9]+$" | sort -V | tail -n1)
+            [ -z "$LATEST_TAG" ] && { echo "❌ No tag for series '$SERIES'"; exit 1; }
+            TAG="$LATEST_TAG"
+          fi
+          echo "OPENWRT_REPO=$REPO_URL_OFFICIAL" >> "$GITHUB_ENV"
+          echo "OPENWRT_COMMIT=" >> "$GITHUB_ENV"
+          echo "OPENWRT_REF=$REF"  >> "$GITHUB_ENV"
+          echo "OPENWRT_TAG=$TAG"  >> "$GITHUB_ENV"
+          echo "OPENWRT_LABEL=${{ matrix.label }}" >> "$GITHUB_ENV"
+          echo "=== branch mode === ref=$REF tag=${TAG:-<none>}"
+        fi
+
+    - name: Initialize build log
+      run: |
+        {
+        echo "=== BUILD LOG (${{ matrix.slot }}) - $(date) ==="
+        echo "Matrix slot           : ${{ matrix.slot }}"
+        echo "Matrix label          : ${{ matrix.label }}"
+        echo "Workflow triggered by : ${{ github.event_name }}"
+        echo "Repository            : ${{ github.repository }}"
+        echo "Workflow commit       : ${{ github.sha }}"
+        echo "Source mode           : $SOURCE_MODE"
+        echo "OpenWrt repo          : $OPENWRT_REPO"
+        echo "OpenWrt ref/branch    : $OPENWRT_REF"
+        echo "OpenWrt commit        : ${OPENWRT_COMMIT:-<none - branch/tag>}"
+        echo "OpenWrt tag           : ${OPENWRT_TAG:-<none>}"
+        echo "========================================"
+        echo "Build started at: $(date)"
+        echo "========================================"
+        } > "$LOGFILE"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add "$LOGFILE"
+        git commit -m "Init ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
+        for attempt in 1 2 3 4 5; do
+          git pull --rebase origin main 2>/dev/null || true
+          git push origin main 2>/dev/null && { echo "✅ Log pushed"; break; }
+          sleep 5
+        done
+
+    - name: Check if .config exists in repo root
+      run: |
+        [ -f .config ] && echo "✅ .config found" || { echo "❌ .config missing"; exit 1; }
+
+    - name: Initialize environment
+      run: |
+        echo "=== Initializing environment ===" | tee -a "$LOGFILE"
+        sudo apt update 2>&1 | tee -a "$LOGFILE"
+        sudo apt install -y build-essential clang flex bison g++ gawk \
+          gcc-multilib g++-multilib gettext libncurses5-dev libssl-dev \
+          python3-distutils rsync unzip zlib1g-dev file wget curl \
+          libelf-dev autoconf automake libtool binutils bzip2 \
+          diffutils patch perl sed xz-utils coreutils findutils bash jq 2>&1 | tee -a "$LOGFILE"
+        sudo apt clean && sudo rm -rf /var/lib/apt/lists/*
+
+    - name: Clone OpenWrt source (branch/tag or pinned commit)
+      run: |
+        echo "=== Cloning OpenWrt source ($SOURCE_MODE) ===" | tee -a "$LOGFILE"
+        if [ "$SOURCE_MODE" = "commit" ]; then
+          git init openwrt
+          cd openwrt
+          git remote add origin "$OPENWRT_REPO"
+          git fetch --depth 1 origin "$OPENWRT_COMMIT" 2>&1 | tee -a "../$LOGFILE"
+          git checkout FETCH_HEAD 2>&1 | tee -a "../$LOGFILE"
+          ACTUAL=$(git rev-parse HEAD)
+          case "$ACTUAL" in
+            ${OPENWRT_COMMIT}*|*"${OPENWRT_COMMIT}"*) : ;;
+            *) echo "❌ HEAD=$ACTUAL لا يطابق المطلوب $OPENWRT_COMMIT"; exit 1 ;;
+          esac
+          echo "=== Pinned commit ===" | tee -a "../$LOGFILE"
+          git log -1 --format='commit  %H%ndate    %cs%nsubject %s' | tee -a "../$LOGFILE"
+          echo "OPENWRT_COMMIT_FULL=$ACTUAL" >> "$GITHUB_ENV"
+          cd ..
+        else
+          git clone --depth 1 --branch "$OPENWRT_REF" "$OPENWRT_REPO" openwrt 2>&1 | tee -a "$LOGFILE"
+          cd openwrt
+          if [ -n "$OPENWRT_TAG" ]; then
+            git fetch --depth 1 origin "refs/tags/$OPENWRT_TAG:refs/tags/$OPENWRT_TAG" 2>&1 | tee -a "../$LOGFILE"
+            git checkout "tags/$OPENWRT_TAG" 2>&1 | tee -a "../$LOGFILE"
+          fi
+          echo "=== Actual checked-out commit ===" | tee -a "../$LOGFILE"
+          git log -1 --format='commit  %H%ndate    %cs%nsubject %s' | tee -a "../$LOGFILE"
+          echo "OPENWRT_COMMIT_FULL=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          cd ..
+        fi
+        rm -rf openwrt/.git
+
+    - name: Update & Install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a 2>&1 | tee -a "../$LOGFILE"
+        ./scripts/feeds install -a 2>&1 | tee -a "../$LOGFILE"
+
+    - name: Apply patches via Python script (branch mode / run_apply_patches)
+      if: ${{ github.event.inputs.source_mode == 'branch' || github.event.inputs.run_apply_patches == 'true' }}
+      run: |
+        echo "=== Applying patches ===" | tee -a "$LOGFILE"
+        python3 apply_patches.py 2>&1 | tee -a "$LOGFILE"
+
+    - name: Skip apply_patches (commit mode carries device files in-tree)
+      if: ${{ github.event.inputs.source_mode == 'commit' && github.event.inputs.run_apply_patches != 'true' }}
+      run: |
+        echo "=== apply_patches.py SKIPPED: base commit carries the device files ===" | tee -a "$LOGFILE"
+        if ! grep -rq "comfast_cf-wa350" openwrt/target/linux/ath79/image/generic.mk; then
+          echo "❌ الكوميت لا يحوي تعريف الجهاز في generic.mk — فعّل run_apply_patches" | tee -a "$LOGFILE"
+          exit 1
+        fi
+        echo "✅ generic.mk يحتوي comfast_cf-wa350" | tee -a "$LOGFILE"
+
+    - name: 🌳 Inject DTS from this repo (+ variant classification & gates)
+      if: ${{ github.event.inputs.inject_dts == 'true' }}
+      run: |
+        set -u
+        SRC="dts/qca9563_comfast_cf-wa350.dts"
+        DST="openwrt/target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts"
+        [ -f "$SRC" ] || { echo "❌ $SRC غير موجود في هذا المستودع"; exit 1; }
+        cp -v "$SRC" "$DST" 2>&1 | tee -a "$LOGFILE"
+        SHA=$(sha256sum "$DST" | cut -d' ' -f1)
+        INT=$(grep -c 'phy-mode = "internal"' "$DST" || true)
+        PH=$(grep -c 'phy-handle *=' "$DST" || true)
+        MD=$(grep -cE '^[[:space:]]+mdio \{' "$DST" || true)
+        if [ "$MD" -ge 1 ] && [ "$INT" -ge 1 ]; then
+          VARIANT="INTERNAL+MDIO-CHILD"
+        elif [ "$INT" -ge 1 ] && [ "$PH" -eq 0 ]; then
+          VARIANT="INTERNAL-LEGACY"
+        elif [ "$PH" -ge 1 ] && [ "$INT" -eq 0 ]; then
+          VARIANT="EXTERNAL-MDIO"
+        else
+          VARIANT="UNKNOWN"
+        fi
+        {
+        echo "=== DTS identity ==="
+        echo "sha256  : $SHA"
+        echo "variant : $VARIANT  (internal:$INT phy-handle:$PH mdio-child:$MD)"
+        } | tee -a "$LOGFILE"
+        echo "DTS_SHA=$SHA"       >> "$GITHUB_ENV"
+        echo "DTS_VARIANT=$VARIANT" >> "$GITHUB_ENV"
+        P731="${{ github.event.inputs.include_patch_731 }}"
+        case "$VARIANT" in
+          UNKNOWN)
+            echo "❌ لا أستطيع تصنيف الـ DTS — أوقف قبل إضاعة ساعات البناء"; exit 1 ;;
+          "INTERNAL+MDIO-CHILD")
+            if [ "$P731" != "true" ]; then
+              echo "❌ DTS بعقدة mdio ابنة (عناوين PHY داخلية 0/1) بلا include_patch_731"
+              echo "   = توليفة حلقة الإقلاع المعروفة (ar8216 + 730 فوق qca8k MDIO master)."
+              echo "   فعّل include_patch_731 أو استعمل نسخة legacy (بلا عقدة mdio)."; exit 1
+            fi ;;
+          "INTERNAL-LEGACY")
+            if [ "$P731" = "true" ]; then
+              echo "⚠️ 731 مفعّلة مع legacy — غير ضارة لكنها غير لازمة (العنوانان 1/2 خارج مرشّح ar8216)."
+            else
+              echo "✅ legacy internal بلا 731 — التوليفة الصحيحة (لا اعتماد على رقعة نواة)"
+            fi ;;
+          "EXTERNAL-MDIO")
+            echo "ℹ️ external: ar8216 سيسجّل swconfig وهمياً ثم يفشل بـ -EINVAL (رسالتا إقلاع تجميليتان)." ;;
+        esac
+
+    - name: 🩹 Import patch 731 from building-helper (+ compile-safety gate)
+      if: ${{ github.event.inputs.include_patch_731 == 'true' }}
+      run: |
+        set -u
+        TMP=/tmp/helper-731
+        rm -rf "$TMP"
+        git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
+        P=$(ls "$TMP"/patches/731-*.patch 2>/dev/null | head -1)
+        [ -n "$P" ] || { echo "❌ لا توجد patches/731-*.patch في building-helper"; exit 1; }
+        if grep -q '&mdio_bus_type' "$P"; then
+          echo "❌ هذه النسخة تستعمل &mdio_bus_type — رمز خاص بـ phylib وغير مُصدَّر"
+          echo "   (مُعلَن فقط في drivers/net/phy/phylib-internal.h) ⇒ فشل تصريف مؤكد:"
+          echo "   error: 'mdio_bus_type' undeclared."
+          echo "   النسخة المعطوبة sha256=f53aaec6… (3091 B). المطلوب النسخة المُصحَّحة"
+          echo "   sha256=dcf96672… (3952 B) التي تتعرف على الباص بالاسم \"mdio_bus\"."
+          echo "   استبدل الملف في building-helper/patches/ ثم أعد التشغيل."; exit 1
+        fi
+        PDIR=$(ls -d openwrt/target/linux/ath79/patches-6.* 2>/dev/null | sort -V | tail -1)
+        [ -n "$PDIR" ] || { echo "❌ لا يوجد مجلد patches-6.* في target/linux/ath79"; exit 1; }
+        cp -v "$P" "$PDIR/" 2>&1 | tee -a "$LOGFILE"
+        sha256sum "$PDIR"/731-*.patch | tee -a "$LOGFILE"
+        echo "P731_DIR=$PDIR" >> "$GITHUB_ENV"
+        echo "P731_SHA=$(sha256sum "$P" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+        echo "✅ 731 installed into $PDIR" | tee -a "$LOGFILE"
+
+    - name: Import cfw-leds from building-helper (+ underscore-name gate)
+      if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
+      run: |
+        set -u
+        TMP=/tmp/cfw-src; rm -rf "$TMP"
+        git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
+        SRC="$TMP/cfw-leds"
+        [ -d "$SRC" ] || { echo "❌ cfw-leds/ غير موجودة في building-helper"; exit 1; }
+        TARGET_PARENT="openwrt/package/utils"; TARGET_DIR="$TARGET_PARENT/cfw-leds"
+        mkdir -p "$TARGET_PARENT"; rm -rf "$TARGET_DIR"
+        cp -r "$SRC" "$TARGET_PARENT"/
+        find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+        find "$TARGET_DIR/files" -type f -exec chmod +x {} \; 2>/dev/null || true
+        CTRL="$TARGET_DIR/files/cfw_led_ctrl"
+        [ -f "$CTRL" ] || { echo "❌ files/cfw_led_ctrl غير موجود"; exit 1; }
+        if grep -q 'blue:ext_wan\|blue:ext_lan\|blue:ext_wlan2g' "$CTRL"; then
+          echo "❌ نسخة cfw_led_ctrl قديمة (أسماء بشرطة سفلية ext_wan/ext_lan/ext_wlan2g)."
+          echo "   أسماء sysfs الحقيقية واصلة: blue:ext-wan … ⇒ اللمبات الخارجية لن تعمل."
+          echo "   المطلوب نسخة رأس الـ PR (12112 B, sha256=5f5eabad…)."; exit 1
+        fi
+        [ -f "$TARGET_DIR/files/cfw_leds.init" ] && \
+          echo "⚠️ بقية قديمة: files/cfw_leds.init (الاسم القديم) — احذفها من building-helper (المستعمل files/cfw-leds.init)"
+        CFW_SHA=$(sha256sum "$CTRL" | cut -d' ' -f1)
+        echo "cfw_led_ctrl: $(stat -c%s "$CTRL") bytes sha256=$CFW_SHA" | tee -a "$LOGFILE"
+        echo "CFW_SHA=$CFW_SHA" >> "$GITHUB_ENV"
+        echo "✅ cfw-leds imported (hyphenated names verified)"
+
+    - name: Import luci-theme-enan-dashboard
+      if: ${{ github.event.inputs.attach_theme == 'true' }}
+      run: |
+        TMP=/tmp/theme-src; rm -rf "$TMP"
+        git clone --depth 1 "$HELPER_REPO" "$TMP"
+        SRC="$TMP/luci-theme-enan-dashboard"
+        [ -d "$SRC" ] || { echo "❌ theme folder missing"; exit 1; }
+        mkdir -p openwrt/package; rm -rf openwrt/package/luci-theme-enan-dashboard
+        cp -r "$SRC" openwrt/package/
+        echo "✅ theme imported" | tee -a "$LOGFILE"
+
+    - name: Inject custom files
+      if: ${{ github.event.inputs.include_files == 'true' }}
+      run: |
+        if [ -d files ]; then mkdir -p openwrt/files; cp -rv files/* openwrt/files/ 2>&1 | tee -a "$LOGFILE"
+        else echo "No 'files' directory found." | tee -a "$LOGFILE"; fi
+
+    - name: Copy .config and verify active options
+      run: |
+        echo "=== Copying .config ===" | tee -a "$LOGFILE"
+        cp -v .config openwrt/.config 2>&1 | tee -a "$LOGFILE"
+        cd openwrt
+        cp .config config-before.txt
+        if [ "${{ github.event.inputs.attach_theme }}" = "true" ]; then
+          sed -i '/^CONFIG_PACKAGE_luci-theme-enan-dashboard=/d' .config
+          sed -i '/^# CONFIG_PACKAGE_luci-theme-enan-dashboard is not set/d' .config
+          echo "CONFIG_PACKAGE_luci-theme-enan-dashboard=y" >> .config
+        fi
+        if [ "${{ github.event.inputs.import_cfw_leds }}" = "false" ]; then
+          sed -i '/^CONFIG_PACKAGE_cfw-leds=/d' .config
+          sed -i '/^# CONFIG_PACKAGE_cfw-leds is not set/d' .config
+          echo "# CONFIG_PACKAGE_cfw-leds is not set" >> .config
+        fi
+        make olddefconfig 2>&1 | tee -a "../$LOGFILE"
+        make defconfig     2>&1 | tee -a "../$LOGFILE"
+        cp .config config-after.txt
+        if ! grep -q "CONFIG_TARGET_ath79_generic_DEVICE_comfast_cf-wa350=y" .config; then
+          echo "⚠️ Re-adding target device..." | tee -a "../$LOGFILE"
+          echo "CONFIG_TARGET_ath79=y" >> .config
+          echo "CONFIG_TARGET_ath79_generic=y" >> .config
+          echo "CONFIG_TARGET_ath79_generic_DEVICE_comfast_cf-wa350=y" >> .config
+          make defconfig 2>&1 | tee -a "../$LOGFILE"
+          cp .config config-after.txt
+        fi
+        echo "✅ .config verification completed." | tee -a "../$LOGFILE"
+
+    - name: 🪪 Build identity card (IDENTITY.txt)
+      run: |
+        cd openwrt
+        KP=$(grep -m1 'KERNEL_PATCHVER' target/linux/ath79/Makefile | cut -d'=' -f2)
+        GCCV=$(grep -m1 '^CONFIG_GCC_VERSION=' .config | cut -d'"' -f2)
+        {
+        echo "================ BUILD IDENTITY ================"
+        echo "generated      : $(date -u +%FT%TZ)"
+        echo "run            : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        echo "slot / label   : ${{ matrix.slot }} / ${{ matrix.label }}"
+        echo "source mode    : $SOURCE_MODE"
+        echo "source repo    : $OPENWRT_REPO"
+        echo "base commit    : ${OPENWRT_COMMIT_FULL:-?}"
+        echo "ref / tag      : $OPENWRT_REF / ${OPENWRT_TAG:-<none>}"
+        echo "kernel series  : ${KP:-?}"
+        echo "gcc (config)   : ${GCCV:-?}"
+        echo "DTS sha256     : ${DTS_SHA:-<not injected - in-tree>}"
+        echo "DTS variant    : ${DTS_VARIANT:-<in-tree>}"
+        if [ -n "${DTS_SHA:-}" ]; then :; else
+          sha256sum target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts | cut -d' ' -f1 | sed 's/^/in-tree DTS sha: /'
+        fi
+        echo "patch 731      : ${P731_SHA:-ABSENT} ${P731_DIR:+in $P731_DIR}"
+        echo "cfw_led_ctrl   : ${CFW_SHA:-<not imported>}"
+        grep -E '^CONFIG_PACKAGE_(kmod-dsa-qca8k|kmod-phy-qca83xx|cfw-leds)=|^# CONFIG_PACKAGE_swconfig ' .config | sed 's/^/config: /'
+        echo "================================================"
+        } | tee -a "../$LOGFILE" | tee ../IDENTITY.txt
+
+    - name: Upload config snapshots (before/after)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: config-snapshots-${{ matrix.label }}
+        path: |
+          openwrt/config-before.txt
+          openwrt/config-after.txt
+        if-no-files-found: warn
+
+    - name: Download package sources
+      run: |
+        cd openwrt
+        make download -j$(nproc) 2>&1 | tee -a "../$LOGFILE"
+        find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
+        rm -rf dl/*.tmp 2>/dev/null || true
+
+    - name: Build OpenWrt (all cores)
+      run: |
+        {
+        echo "=== Building OpenWrt ==="
+        echo "Slot           : ${{ matrix.slot }}"
+        echo "Label          : ${{ matrix.label }}"
+        echo "Source mode    : $SOURCE_MODE"
+        echo "Base commit    : ${OPENWRT_COMMIT_FULL:-$OPENWRT_REF} ${OPENWRT_TAG:-}"
+        echo "Build started at: $(date)"
+        } | tee -a "$LOGFILE"
+        cd openwrt
+        make -j$(nproc) V=s 2>&1 | tee -a "../$LOGFILE"
+        echo "Build finished at: $(date)" | tee -a "../$LOGFILE"
+      timeout-minutes: 360
+
+    - name: List all files in bin/targets/ath79/generic/
+      if: always()
+      run: |
+        cd openwrt
+        if [ -d bin/targets/ath79/generic/ ]; then
+          ls -la bin/targets/ath79/generic/ 2>&1 | tee -a "../$LOGFILE"
+        else
+          echo "❌ Directory bin/targets/ath79/generic/ does not exist!" | tee -a "../$LOGFILE"
+        fi
+
+    - name: Collect artifacts (images, kernel, dtb, injected, identity, logs)
+      if: always()
+      run: |
+        set -u
+        echo "=== Collecting artifacts ===" | tee -a "$LOGFILE"
+        cd openwrt
+        rm -rf out
+        mkdir -p out/images out/kernel out/dtb out/injected out/logs
+        cp -v bin/targets/ath79/generic/*cf-wa350*         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/sha256sums         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/*.manifest         out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/config.buildinfo   out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/feeds.buildinfo    out/images/ 2>/dev/null || true
+        cp -v bin/targets/ath79/generic/version.buildinfo  out/images/ 2>/dev/null || true
+        KD="$(ls -d build_dir/target-*/linux-ath79_generic 2>/dev/null | head -1)"
+        echo "=== kernel dir: ${KD:-none} ===" | tee -a "../$LOGFILE"
+        if [ -n "${KD:-}" ]; then
+          for f in vmlinux vmlinuz vmlinux.elf vmlinuz.elf System.map; do
+            [ -e "$KD/$f" ] && cp -v "$KD/$f" out/kernel/ || true
+          done
+          [ -e "$KD/.config" ] && cp -v "$KD/.config" out/kernel/kernel-dot-config || true
+          gzip -9f out/kernel/vmlinux 2>/dev/null || true
+          find build_dir/target-*/ -maxdepth 4 -name '*kernel*.bin' -exec cp -v {} out/kernel/ \; 2>/dev/null || true
+          find "$KD" -name '*cf-wa350*.dtb'  -exec cp -v {} out/dtb/ \; 2>/dev/null || true
+          find "$KD" -name '*cf-wa350*.dts*' -exec cp -v {} out/dtb/ \; 2>/dev/null || true
+          mkdir -p out/dtb/all-built
+          find "$KD" -name '*.dtb' -exec cp {} out/dtb/all-built/ \; 2>/dev/null || true
+        fi
+        echo "=== injected / device files as they ended up in the tree ===" | tee -a "../$LOGFILE"
+        cp -v target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts               out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/generic/base-files/etc/board.d/01_leds         out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/generic/base-files/etc/board.d/02_network      out/injected/ 2>/dev/null || true
+        cp -v target/linux/ath79/image/generic.mk                               out/injected/ 2>/dev/null || true
+        cp -v .config                                                           out/injected/dot-config 2>/dev/null || true
+        ls -d target/linux/ath79/patches-6.*/731-* >/dev/null 2>&1 && \
+          cp -v target/linux/ath79/patches-6.*/731-* out/injected/ 2>/dev/null || true
+        [ -d package/utils/cfw-leds ] && cp -rv package/utils/cfw-leds out/injected/cfw-leds || true
+        [ -d package/luci-theme-enan-dashboard ] && cp -rv package/luci-theme-enan-dashboard out/injected/luci-theme-enan-dashboard || true
+        cp -v "../$LOGFILE" out/logs/ 2>/dev/null || true
+        [ -e ../IDENTITY.txt ] && cp -v ../IDENTITY.txt out/logs/00-identity.txt || true
+        sha256sum bin/targets/ath79/generic/*cf-wa350* > out/logs/40-sha256.txt 2>/dev/null || true
+        find out -type f | sort | sed 's|^|  |' | tee out/logs/50-bundle-list.txt
+        du -sh out/* 2>/dev/null | tee -a out/logs/50-bundle-list.txt
+        echo "✅ Artifacts collected into openwrt/out/" | tee -a "../$LOGFILE"
+
+    - name: Clean temporary build directories
+      if: always()
+      run: |
+        cd openwrt && rm -rf build_dir staging_dir
+
+    - name: Upload log to repository (always)
+      if: always()
+      run: |
+        echo "=== BUILD LOG END - $(date) ===" >> "$LOGFILE"
+        echo "Build completed with status: ${{ job.status }}" >> "$LOGFILE"
+        echo "Slot: ${{ matrix.slot }} | Label: ${{ matrix.label }}" >> "$LOGFILE"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add "$LOGFILE"
+        git commit -m "Update ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
+        for attempt in 1 2 3 4 5; do
+          git pull --rebase origin main 2>/dev/null || true
+          git push origin main 2>/dev/null && { echo "✅ Log pushed"; break; }
+          sleep 5
+        done
+
+    - name: Upload full log as artifact (always)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: full-build-log-${{ matrix.label }}
+        path: ${{ env.LOGFILE }}
+        if-no-files-found: error
+
+    - name: Upload collected artifact bundle (out/)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cf-wa350-bundle-${{ matrix.label }}-${{ github.sha }}
+        path: openwrt/out/
+        if-no-files-found: warn
+
+    - name: Upload firmware (quick access)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: cf-wa350-${{ matrix.label }}-${{ github.sha }}
+        path: |
+          openwrt/bin/targets/ath79/generic/openwrt-*comfast_cf-wa350*
+          openwrt/bin/targets/ath79/generic/sha256sums
+          openwrt/bin/targets/ath79/generic/config.buildinfo
+        if-no-files-found: warn
