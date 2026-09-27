@@ -24,7 +24,7 @@
 #                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
 #    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
 # ============================================================================
-name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
+name: 2 Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
 on:
   workflow_dispatch:
