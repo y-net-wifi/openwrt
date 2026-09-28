@@ -274,3 +274,16 @@
 	nvmem-cells = <&macaddr_art_0 10>, <&cal_art_1000>;
 	nvmem-cell-names = "mac-address", "calibration";
 };
+
+/* ---- DIAGNOSTIC E1: radios disabled (single variable vs E0) ----
+ * If this image stops the boot loop, the oops is in the wireless stack
+ * (ath10k-ct on PCIe, or ath9k on the SoC WMAC) -- e.g. a different 5 GHz
+ * card, or unusable calibration data in the art partition.
+ */
+&pcie {
+	status = "disabled";
+};
+
+&wmac {
+	status = "disabled";
+};
