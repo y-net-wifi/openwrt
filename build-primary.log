@@ -1,20 +1,20 @@
-=== BUILD LOG (primary) - Tue Sep 29 01:24:39 +03 2026 ===
+=== BUILD LOG (primary) - Tue Sep 29 01:53:38 +03 2026 ===
 Matrix slot           : primary
 Matrix label          : snapshot-latest
 Workflow triggered by : workflow_dispatch
 Repository            : y-net-wifi/openwrt
-Commit                : e3cabf4be460b1c540cdbdef32dafeb52b78619e
+Commit                : c8fedf6a50d524086065ab2eaaffd5dbbaf30bf2
 OpenWrt branch input  : snapshot
 OpenWrt git branch    : master
 OpenWrt tag           : <none>
 Patch version input   : <empty>
-DTS choice            : qca9563_comfast_cf-wa350.dts
+DTS choice            : qca9563_comfast_cf-wa350-explicit-mdio.dts
 include_files         : true
-patch_731 (input)     : false
+patch_731 (input)     : true
 patch_740 (input)     : true
 diag_kconfig (input)  : true
 import_cfw_leds       : true
 attach_theme          : false
 ========================================
-Build started at: Tue Sep 29 01:24:39 +03 2026
+Build started at: Tue Sep 29 01:53:38 +03 2026
 ========================================
