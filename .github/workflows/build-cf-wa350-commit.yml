@@ -24,7 +24,7 @@
 #                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
 #    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
 # ============================================================================
-name: 2 Remote Build COMFAST CF-WA350 (Commit / Matrix)
+name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
 on:
   workflow_dispatch:
@@ -77,6 +77,11 @@ on:
         type: boolean
       gcc13:
         description: '🧪 تثبيت GCC على 13.4.0 بدل الافتراضي 14.4.0 (تجربة عزل المُصرِّف)'
+        required: false
+        default: false
+        type: boolean
+      import_kernel_patches:
+        description: '🧩 استيراد كل building-helper/patches/*.patch إلى target/linux/ath79/patches-6.* (مثال: 740 لإصلاح Macronix MX25L12805D — لبنيات 6.18 فقط)'
         required: false
         default: false
         type: boolean
@@ -441,6 +446,29 @@ jobs:
         echo "P731_SHA=$(sha256sum "$P" | cut -d' ' -f1)" >> "$GITHUB_ENV"
         echo "✅ 731 installed into $PDIR" | tee -a "$LOGFILE"
 
+    - name: 🧩 Import all kernel patches from building-helper/patches
+      if: ${{ github.event.inputs.import_kernel_patches == 'true' }}
+      run: |
+        set -u
+        TMP=/tmp/helper-patches; rm -rf "$TMP"
+        git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
+        PDIR=$(ls -d openwrt/target/linux/ath79/patches-6.* 2>/dev/null | sort -V | tail -1)
+        [ -n "$PDIR" ] || { echo "❌ لا يوجد مجلد patches-6.*"; exit 1; }
+        N=0
+        for f in "$TMP"/patches/*.patch; do
+          [ -e "$f" ] || continue
+          if grep -q '&mdio_bus_type' "$f"; then
+            echo "❌ $(basename "$f") تستعمل &mdio_bus_type (رمز phylib الخاص غير المُصدَّر) ⇒ فشل تصريف مؤكد."
+            echo "   احذف النسخة المعطوبة من building-helper/patches أو استبدلها بالمُصحَّحة (dcf96672…)."; exit 1
+          fi
+          cp -v "$f" "$PDIR/" 2>&1 | tee -a "$LOGFILE"
+          N=$((N+1))
+        done
+        [ "$N" -ge 1 ] || { echo "❌ building-helper/patches فارغ"; exit 1; }
+        sha256sum "$PDIR"/*.patch | tee -a "$LOGFILE"
+        echo "EXTRA_PATCHES=$N" >> "$GITHUB_ENV"
+        echo "✅ $N kernel patch(es) imported into $PDIR"
+
     - name: Import cfw-leds from building-helper (+ underscore-name gate)
       if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
       run: |
@@ -559,6 +587,7 @@ jobs:
         echo "patch 731      : ${P731_SHA:-ABSENT} ${P731_DIR:+in $P731_DIR}"
         echo "cfw_led_ctrl   : ${CFW_SHA:-<not imported>}"
         echo "diag kconfig   : ${DIAG_KCONFIG:-off}"
+        echo "kernel patches : ${EXTRA_PATCHES:-0} imported (see log for sha256)"
         echo "gcc pin        : $([ "${{ github.event.inputs.gcc13 }}" = "true" ] && echo '13.4.0 (pinned)' || echo 'default')"
         grep -E '^CONFIG_PACKAGE_(kmod-dsa-qca8k|kmod-phy-qca83xx|cfw-leds)=|^# CONFIG_PACKAGE_swconfig ' .config | sed 's/^/config: /'
         echo "================================================"
@@ -642,8 +671,12 @@ jobs:
         cp -v target/linux/ath79/generic/base-files/etc/board.d/02_network      out/injected/ 2>/dev/null || true
         cp -v target/linux/ath79/image/generic.mk                               out/injected/ 2>/dev/null || true
         cp -v .config                                                           out/injected/dot-config 2>/dev/null || true
-        ls -d target/linux/ath79/patches-6.*/731-* >/dev/null 2>&1 && \
-          cp -v target/linux/ath79/patches-6.*/731-* out/injected/ 2>/dev/null || true
+        for f in target/linux/ath79/patches-6.*/*.patch; do
+          case "$(basename "$f")" in
+            70*|71*|72*|730-*|8*|9*) : ;;   # رقع الشجرة القياسية
+            *) cp -v "$f" out/injected/ 2>/dev/null || true ;;
+          esac
+        done
         [ -d package/utils/cfw-leds ] && cp -rv package/utils/cfw-leds out/injected/cfw-leds || true
         [ -d package/luci-theme-enan-dashboard ] && cp -rv package/luci-theme-enan-dashboard out/injected/luci-theme-enan-dashboard || true
         cp -v "../$LOGFILE" out/logs/ 2>/dev/null || true
