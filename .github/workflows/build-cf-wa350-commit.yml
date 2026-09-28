@@ -38,7 +38,7 @@
 #                            + run_apply_patches=true + inject_dts (legacy)
 #    D) classic releases    : branch mode (24.10 / 25.12 / snapshot)
 # ============================================================================
-name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
+name: 2 Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
 on:
   workflow_dispatch:
