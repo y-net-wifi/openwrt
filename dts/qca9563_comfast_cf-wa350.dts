@@ -1,4 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * !!! DIAGNOSTIC BUILD -- DO NOT SHIP, DO NOT FLASH ON A PRODUCTION BOARD !!!
+ *
+ * LED instrumentation (serial console substitute):
+ *   blue ext-wan : heartbeat        -> kernel is alive (blinks from ~1 s)
+ *   blue ext-lan : panic-indicator  -> lit while the kernel panics
+ *                                       (needs CONFIG_LEDS_TRIGGER_PANIC=y and
+ *                                        CONFIG_PANIC_TIMEOUT=10, see DIAG-KCONFIG.txt)
+ *   green lan    : led-boot/led-running -> blinking = reached preinit,
+ *                                        steady    = fully booted
+ *
+ * Reading the pattern on the failing board:
+ *   no blink at all            -> dies before LED registration (~1 s): RAM/DTB/decompress
+ *   heartbeat N sec, then ext-lan on ~10 s, reboot -> kernel oops at ~N s (panic lamp)
+ *   heartbeat steady, no ext-lan, no green         -> hard hang (not a panic)
+ *   heartbeat + green blinking                     -> reached preinit
+ */
 
 #include "qca956x.dtsi"
 
@@ -40,6 +57,7 @@
 		};
 
 		ext_wan {
+			linux,default-trigger = "heartbeat";
 			color = <LED_COLOR_ID_BLUE>;
 			function = "ext-wan";
 			gpios = <&gpio 7 GPIO_ACTIVE_LOW>;
@@ -52,6 +70,7 @@
 		};
 
 		ext_lan {
+			panic-indicator;
 			color = <LED_COLOR_ID_BLUE>;
 			function = "ext-lan";
 			gpios = <&gpio 21 GPIO_ACTIVE_LOW>;
