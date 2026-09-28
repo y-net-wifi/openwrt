@@ -24,7 +24,7 @@
 #                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
 #    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
 # ============================================================================
-name: 2 Remote Build COMFAST CF-WA350 (Commit / Matrix)
+name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
 on:
   workflow_dispatch:
@@ -67,6 +67,16 @@ on:
         type: string
       allow_known_bad_combo:
         description: '☠️ اسمح بتوليفة explicit-mdio بلا 731 (بناء شاهد سلبي متعمد — صورة حلقة إقلاع؛ للوحات التجارب فقط)'
+        required: false
+        default: false
+        type: boolean
+      diag_kconfig:
+        description: '💡 حقن سطحي التشخيص باللمبات (LEDS_TRIGGER_PANIC=y + PANIC_TIMEOUT=10) في kernel config — للبناء التشخيصي فقط'
+        required: false
+        default: false
+        type: boolean
+      gcc13:
+        description: '🧪 تثبيت GCC على 13.4.0 بدل الافتراضي 14.4.0 (تجربة عزل المُصرِّف)'
         required: false
         default: false
         type: boolean
@@ -475,12 +485,33 @@ jobs:
         if [ -d files ]; then mkdir -p openwrt/files; cp -rv files/* openwrt/files/ 2>&1 | tee -a "$LOGFILE"
         else echo "No 'files' directory found." | tee -a "$LOGFILE"; fi
 
+    - name: 💡 Inject diagnostic kernel config (panic lamp)
+      if: ${{ github.event.inputs.diag_kconfig == 'true' }}
+      run: |
+        KCFG="openwrt/target/linux/ath79/config-6.18"
+        [ -f "$KCFG" ] || KCFG="openwrt/target/linux/ath79/config-6.12"
+        [ -f "$KCFG" ] || { echo "❌ لا يوجد kernel config لـ ath79"; exit 1; }
+        sed -i '/CONFIG_LEDS_TRIGGER_PANIC/d;/CONFIG_PANIC_TIMEOUT/d' "$KCFG"
+        printf 'CONFIG_LEDS_TRIGGER_PANIC=y\nCONFIG_PANIC_TIMEOUT=10\n' >> "$KCFG"
+        echo "=== diag kconfig appended to $KCFG ===" | tee -a "$LOGFILE"
+        tail -3 "$KCFG" | tee -a "$LOGFILE"
+        echo "DIAG_KCONFIG=1 ($KCFG)" >> "$GITHUB_ENV"
+        echo "⚠️ تحقق بعد البناء أن out/kernel/kernel-dot-config يحوي PANIC_TIMEOUT=10"
+        echo "   (إن بقي =1 فالتجاوز لم ينجح — انقل السطرين إلى target/linux/generic/config-6.18)"
+
     - name: Copy .config and verify active options
       run: |
         echo "=== Copying .config ===" | tee -a "$LOGFILE"
         cp -v .config openwrt/.config 2>&1 | tee -a "$LOGFILE"
         cd openwrt
         cp .config config-before.txt
+        if [ "${{ github.event.inputs.gcc13 }}" = "true" ]; then
+          sed -i '/^CONFIG_TOOLCHAINOPTS/d;/^# CONFIG_TOOLCHAINOPTS/d' .config
+          echo "CONFIG_TOOLCHAINOPTS=y" >> .config
+          sed -i '/^CONFIG_GCC_USE_VERSION/d;/^# CONFIG_GCC_USE_VERSION/d' .config
+          echo "CONFIG_GCC_USE_VERSION_13=y" >> .config
+          echo "🧪 GCC pinned to 13.4.0 (separator experiment)" | tee -a "../$LOGFILE"
+        fi
         if [ "${{ github.event.inputs.attach_theme }}" = "true" ]; then
           sed -i '/^CONFIG_PACKAGE_luci-theme-enan-dashboard=/d' .config
           sed -i '/^# CONFIG_PACKAGE_luci-theme-enan-dashboard is not set/d' .config
@@ -527,6 +558,8 @@ jobs:
         fi
         echo "patch 731      : ${P731_SHA:-ABSENT} ${P731_DIR:+in $P731_DIR}"
         echo "cfw_led_ctrl   : ${CFW_SHA:-<not imported>}"
+        echo "diag kconfig   : ${DIAG_KCONFIG:-off}"
+        echo "gcc pin        : $([ "${{ github.event.inputs.gcc13 }}" = "true" ] && echo '13.4.0 (pinned)' || echo 'default')"
         grep -E '^CONFIG_PACKAGE_(kmod-dsa-qca8k|kmod-phy-qca83xx|cfw-leds)=|^# CONFIG_PACKAGE_swconfig ' .config | sed 's/^/config: /'
         echo "================================================"
         } | tee -a "../$LOGFILE" | tee ../IDENTITY.txt
@@ -593,7 +626,9 @@ jobs:
           for f in vmlinux vmlinuz vmlinux.elf vmlinuz.elf System.map; do
             [ -e "$KD/$f" ] && cp -v "$KD/$f" out/kernel/ || true
           done
-          [ -e "$KD/.config" ] && cp -v "$KD/.config" out/kernel/kernel-dot-config || true
+          for kc in "$KD/.config" "$KD"/linux-*/.config; do
+            [ -e "$kc" ] && { cp -v "$kc" out/kernel/kernel-dot-config; break; }
+          done
           gzip -9f out/kernel/vmlinux 2>/dev/null || true
           find build_dir/target-*/ -maxdepth 4 -name '*kernel*.bin' -exec cp -v {} out/kernel/ \; 2>/dev/null || true
           find "$KD" -name '*cf-wa350*.dtb'  -exec cp -v {} out/dtb/ \; 2>/dev/null || true
