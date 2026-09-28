@@ -275,15 +275,12 @@
 	nvmem-cell-names = "mac-address", "calibration";
 };
 
-/* ---- DIAGNOSTIC E1: radios disabled (single variable vs E0) ----
- * If this image stops the boot loop, the oops is in the wireless stack
- * (ath10k-ct on PCIe, or ath9k on the SoC WMAC) -- e.g. a different 5 GHz
- * card, or unusable calibration data in the art partition.
+/* ---- DIAGNOSTIC E2: SoC MDIO bus disabled (single variable vs E0) ----
+ * Removes both the qca8k switch and the built-in ar8216 driver from the
+ * picture (nothing is probed on mdio.0). eth0 keeps its fixed-link, so the
+ * kernel comes up but there are no LAN/WAN ports: watch the LEDs only.
+ * If this image stops the boot loop, the fault is on the MDIO/switch path.
  */
-&pcie {
-	status = "disabled";
-};
-
-&wmac {
+&mdio0 {
 	status = "disabled";
 };
