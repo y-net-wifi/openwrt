@@ -1,4 +1,4 @@
-name: Remote Build (Matrix - Multi-Version)
+name: Build COMFAST CF-WA350 (Matrix - Multi-Version)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ on:
         type: string
 
       openwrt_branch_2:
-        description: 'Secondary: OpenWrt branch (used only if Matrix Mode ON)'
+        description: 'Secondary: OpenWrt branch'
         required: false
         default: '25.12'
         type: choice
@@ -39,11 +39,46 @@ on:
         default: ''
         type: string
 
+      # ==============================================================
+      # DTS selection — TOP
+      # ==============================================================
+      dts_choice:
+        description: 'DTS variant to use for CF-WA350'
+        required: true
+        default: 'qca9563_comfast_cf-wa350.dts'
+        type: choice
+        options:
+          - 'qca9563_comfast_cf-wa350.dts'
+          - 'qca9563_comfast_cf-wa350-internal-mdio.dts'
+          - 'qca9563_comfast_cf-wa350-explicit-mdio.dts'
+          - 'qca9563_comfast_cf-wa350-external.dts'
+
+      # ==============================================================
+      # Custom files injection (above patches)
+      # ==============================================================
       include_files:
-        description: 'Inject custom files from "files" directory'
+        description: 'Inject custom files from "files" directory (building-helper)'
         required: false
         default: false
         type: boolean
+
+      # ==============================================================
+      # Patch selection (below files)
+      # ==============================================================
+      patch_731:
+        description: 'Include patch 731 (ar8216-skip-phys-on-switch-internal-mdio-bus)'
+        required: false
+        default: false
+        type: boolean
+      patch_740:
+        description: 'Include patch 740 (mtd-spi-nor-macronix-restore-mx25l12805d-name-size)'
+        required: false
+        default: false
+        type: boolean
+
+      # ==============================================================
+      # Package imports
+      # ==============================================================
       import_cfw_leds:
         description: 'Import cfw-leds package into openwrt/package/utils/'
         required: false
@@ -57,6 +92,7 @@ on:
 
 env:
   REPO_URL: https://git.openwrt.org/openwrt/openwrt.git
+  BUILDING_HELPER_REPO: https://github.com/haddad2inc/building-helper.git
   TZ: Asia/Riyadh
 
 jobs:
@@ -81,6 +117,10 @@ jobs:
           echo "enable_matrix : $ENABLE_MATRIX"
           echo "Primary       : branch='$B1' patch='$P1'"
           echo "Secondary     : branch='$B2' patch='$P2'"
+          echo "dts_choice    : ${{ github.event.inputs.dts_choice }}"
+          echo "include_files : ${{ github.event.inputs.include_files }}"
+          echo "patch_731     : ${{ github.event.inputs.patch_731 }}"
+          echo "patch_740     : ${{ github.event.inputs.patch_740 }}"
 
           if [ -n "$P1" ]; then
             LABEL1="${B1}-${P1}"
@@ -239,6 +279,12 @@ jobs:
         echo "OpenWrt git branch    : $OPENWRT_REF" >> "$LOGFILE"
         echo "OpenWrt tag           : ${OPENWRT_TAG:-<none>}" >> "$LOGFILE"
         echo "Patch version input   : ${OPENWRT_PATCH_INPUT:-<empty>}" >> "$LOGFILE"
+        echo "DTS choice            : ${{ github.event.inputs.dts_choice }}" >> "$LOGFILE"
+        echo "include_files         : ${{ github.event.inputs.include_files }}" >> "$LOGFILE"
+        echo "patch_731 (input)     : ${{ github.event.inputs.patch_731 }}" >> "$LOGFILE"
+        echo "patch_740 (input)     : ${{ github.event.inputs.patch_740 }}" >> "$LOGFILE"
+        echo "import_cfw_leds       : ${{ github.event.inputs.import_cfw_leds }}" >> "$LOGFILE"
+        echo "attach_theme          : ${{ github.event.inputs.attach_theme }}" >> "$LOGFILE"
         echo "========================================" >> "$LOGFILE"
         echo "Build started at: $(date)" >> "$LOGFILE"
         echo "========================================" >> "$LOGFILE"
@@ -258,6 +304,97 @@ jobs:
           sleep 5
         done
 
+    # =====================================================================
+    # Import building-helper repository (ALL files/folders)
+    # =====================================================================
+    - name: Import building-helper repository (all files/folders)
+      run: |
+        set -o pipefail
+        echo "=== Importing building-helper repository ===" | tee -a "$LOGFILE"
+        BUILD_HELPER_DIR="/tmp/building-helper"
+
+        rm -rf "$BUILD_HELPER_DIR"
+        if git clone --depth 1 "$BUILDING_HELPER_REPO" "$BUILD_HELPER_DIR" 2>&1 | tee -a "$LOGFILE"; then
+          echo "✅ building-helper clone succeeded." | tee -a "$LOGFILE"
+        else
+          echo "❌ building-helper clone FAILED." | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        rm -rf "$BUILD_HELPER_DIR/.git"
+
+        echo "=== Contents of building-helper (top-level) ===" | tee -a "$LOGFILE"
+        ls -la "$BUILD_HELPER_DIR" | tee -a "$LOGFILE"
+
+        # --- .config ---
+        if [ -f "$BUILD_HELPER_DIR/.config" ]; then
+          cp -v "$BUILD_HELPER_DIR/.config" . 2>&1 | tee -a "$LOGFILE"
+          echo "✅ .config copied to repo root." | tee -a "$LOGFILE"
+        else
+          echo "❌ ERROR: .config not found in building-helper." | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        # --- apply_patches.py ---
+        if [ -f "$BUILD_HELPER_DIR/apply_patches.py" ]; then
+          cp -v "$BUILD_HELPER_DIR/apply_patches.py" . 2>&1 | tee -a "$LOGFILE"
+          echo "✅ apply_patches.py copied to repo root." | tee -a "$LOGFILE"
+        else
+          echo "❌ ERROR: apply_patches.py not found in building-helper." | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        # --- dts/ ---
+        if [ -d "$BUILD_HELPER_DIR/dts" ]; then
+          rm -rf dts
+          cp -rv "$BUILD_HELPER_DIR/dts" . 2>&1 | tee -a "$LOGFILE"
+          echo "✅ dts/ copied to repo root." | tee -a "$LOGFILE"
+          echo "--- Available DTS files ---" | tee -a "$LOGFILE"
+          ls -la dts/ | tee -a "$LOGFILE"
+        else
+          echo "❌ ERROR: dts/ not found in building-helper." | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        # --- patches/ (will be filtered later) ---
+        if [ -d "$BUILD_HELPER_DIR/patches" ]; then
+          rm -rf patches
+          cp -rv "$BUILD_HELPER_DIR/patches" . 2>&1 | tee -a "$LOGFILE"
+          echo "✅ patches/ copied to repo root (will be filtered later)." | tee -a "$LOGFILE"
+          echo "--- Available patches ---" | tee -a "$LOGFILE"
+          ls -la patches/ | tee -a "$LOGFILE"
+        else
+          echo "ℹ️ patches/ not found in building-helper (creating empty)." | tee -a "$LOGFILE"
+          mkdir -p patches
+        fi
+
+        # --- files/ (optional) ---
+        if [ -d "$BUILD_HELPER_DIR/files" ]; then
+          rm -rf files
+          cp -rv "$BUILD_HELPER_DIR/files" . 2>&1 | tee -a "$LOGFILE"
+          echo "✅ files/ copied to repo root." | tee -a "$LOGFILE"
+        else
+          echo "ℹ️ files/ not found in building-helper (skipping)." | tee -a "$LOGFILE"
+        fi
+
+        # --- Any other top-level files ---
+        echo "=== Copying any remaining top-level files ===" | tee -a "$LOGFILE"
+        for item in "$BUILD_HELPER_DIR"/*; do
+          [ -e "$item" ] || continue
+          base="$(basename "$item")"
+          case "$base" in
+            .config|apply_patches.py|dts|patches|files|cfw-leds|luci-theme-enan-dashboard)
+              echo "  (handled separately): $base" | tee -a "$LOGFILE"
+              ;;
+            *)
+              echo "  Copying extra file: $base" | tee -a "$LOGFILE"
+              cp -rv "$item" . 2>&1 | tee -a "$LOGFILE" || true
+              ;;
+          esac
+        done
+
+        echo "✅ building-helper import completed." | tee -a "$LOGFILE"
+
     - name: Check if .config exists in repo root
       run: |
         echo "=== Checking for .config file ===" | tee -a "$LOGFILE"
@@ -267,6 +404,14 @@ jobs:
           echo "❌ ERROR: .config file not found in repository root!" | tee -a "$LOGFILE"
           exit 1
         fi
+
+    - name: Install CA certificates
+      run: |
+        echo "=== Installing CA certificates ===" | tee -a "$LOGFILE"
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends ca-certificates
+        sudo update-ca-certificates --fresh || true
+        echo "=== CA certificates installed ===" | tee -a "$LOGFILE"
 
     - name: Initialize environment
       run: |
@@ -310,57 +455,245 @@ jobs:
         ./scripts/feeds update -a 2>&1 | tee -a "../$LOGFILE"
         ./scripts/feeds install -a 2>&1 | tee -a "../$LOGFILE"
 
+    # =====================================================================
+    # Select DTS variant
+    # =====================================================================
+    - name: Select DTS variant
+      run: |
+        set -o pipefail
+        DTS_CHOICE="${{ github.event.inputs.dts_choice }}"
+        echo "=== Selecting DTS variant: $DTS_CHOICE ===" | tee -a "$LOGFILE"
+
+        SRC_DTS="dts/${DTS_CHOICE}"
+        DST_DTS="dts/qca9563_comfast_cf-wa350.dts"
+
+        if [ ! -f "$SRC_DTS" ]; then
+          echo "❌ ERROR: selected DTS '$SRC_DTS' not found." | tee -a "$LOGFILE"
+          ls -la dts/ | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        if [ "$SRC_DTS" = "$DST_DTS" ]; then
+          echo "✅ Selected DTS is the default one; nothing to replace." | tee -a "$LOGFILE"
+        else
+          cp -v "$SRC_DTS" "$DST_DTS" 2>&1 | tee -a "$LOGFILE"
+          echo "✅ Replaced '$DST_DTS' with content of '$SRC_DTS'." | tee -a "$LOGFILE"
+        fi
+
+        echo "--- dts/qca9563_comfast_cf-wa350.dts (first 20 lines) ---" | tee -a "$LOGFILE"
+        head -n 20 "$DST_DTS" | tee -a "$LOGFILE"
+
+        echo "SELECTED_DTS=$DTS_CHOICE" >> "$GITHUB_ENV"
+
+    # =====================================================================
+    # Filter patches (apply decisions from inputs + auto-enable rules)
+    # =====================================================================
+    - name: Select patches to include
+      run: |
+        set -o pipefail
+        echo "=== Filtering patches ===" | tee -a "$LOGFILE"
+
+        DTS_CHOICE="${{ github.event.inputs.dts_choice }}"
+        PATCH_731_INPUT="${{ github.event.inputs.patch_731 }}"
+        PATCH_740_INPUT="${{ github.event.inputs.patch_740 }}"
+
+        INCLUDE_731="false"
+        if [ "$PATCH_731_INPUT" = "true" ]; then
+          INCLUDE_731="true"
+          echo "ℹ️ patch_731 = true (user requested manually)" | tee -a "$LOGFILE"
+        fi
+        if [ "$DTS_CHOICE" = "qca9563_comfast_cf-wa350-explicit-mdio.dts" ] || \
+           [ "$DTS_CHOICE" = "qca9563_comfast_cf-wa350-external.dts" ]; then
+          INCLUDE_731="true"
+          echo "ℹ️ patch_731 auto-enabled because DTS is '$DTS_CHOICE'" | tee -a "$LOGFILE"
+        fi
+
+        INCLUDE_740="false"
+        if [ "$PATCH_740_INPUT" = "true" ]; then
+          INCLUDE_740="true"
+          echo "ℹ️ patch_740 = true (user requested)" | tee -a "$LOGFILE"
+        fi
+
+        echo "=== Include decisions ===" | tee -a "$LOGFILE"
+        echo "INCLUDE_731 = $INCLUDE_731" | tee -a "$LOGFILE"
+        echo "INCLUDE_740 = $INCLUDE_740" | tee -a "$LOGFILE"
+
+        mkdir -p /tmp/patch-skip
+        rm -f /tmp/patch-skip/* 2>/dev/null || true
+
+        echo "=== Available patches before filtering ===" | tee -a "$LOGFILE"
+        ls -la patches/ | tee -a "$LOGFILE"
+
+        shopt -s nullglob
+        for p in patches/*.patch; do
+          base="$(basename "$p")"
+          KEEP="false"
+          if echo "$base" | grep -q "^731-" && [ "$INCLUDE_731" = "true" ]; then
+            KEEP="true"
+          fi
+          if echo "$base" | grep -q "^740-" && [ "$INCLUDE_740" = "true" ]; then
+            KEEP="true"
+          fi
+          if [ "$KEEP" = "true" ]; then
+            echo "✅ Keeping: $base" | tee -a "$LOGFILE"
+          else
+            echo "⏭️ Skipping: $base" | tee -a "$LOGFILE"
+            mv "$p" /tmp/patch-skip/
+          fi
+        done
+        shopt -u nullglob
+
+        echo "=== Patches after filtering ===" | tee -a "$LOGFILE"
+        if ls patches/*.patch >/dev/null 2>&1; then
+          ls -la patches/ | tee -a "$LOGFILE"
+        else
+          echo "(no patches selected — patches/ is empty)" | tee -a "$LOGFILE"
+        fi
+
+        echo "INCLUDE_731=$INCLUDE_731" >> "$GITHUB_ENV"
+        echo "INCLUDE_740=$INCLUDE_740" >> "$GITHUB_ENV"
+
+    # =====================================================================
+    # Apply patches via apply_patches.py
+    # =====================================================================
     - name: Apply patches via Python script
       run: |
-        echo "=== Applying patches ===" | tee -a "$LOGFILE"
+        set -o pipefail
+        echo "=== Applying patches via apply_patches.py ===" | tee -a "$LOGFILE"
+
         python3 apply_patches.py 2>&1 | tee -a "$LOGFILE"
+
+        echo "=== Verifying kernel patch installation (before normalization) ===" | tee -a "$LOGFILE"
+        if [ -d openwrt/target/linux/ath79 ]; then
+          echo "--- Directories matching patches-6.* ---" | tee -a "$LOGFILE"
+          find openwrt/target/linux/ath79 -maxdepth 1 -type d -name 'patches-6.*' | tee -a "$LOGFILE" || true
+          echo "--- Patch files under patches-6.* ---" | tee -a "$LOGFILE"
+          find openwrt/target/linux/ath79 -maxdepth 2 -path '*/patches-6.*/*.patch' -exec ls -lh {} \; | tee -a "$LOGFILE" || true
+        fi
+
+        echo "✅ apply_patches.py completed." | tee -a "$LOGFILE"
+
+    # =====================================================================
+    # Enforce patches-6.18+ location
+    #   Moves our two patches (731/740) from any patches-6.X where X < 18
+    #   into the highest existing patches-6.18+ directory (creating
+    #   patches-6.18 if none exists).
+    # =====================================================================
+    - name: Enforce patches-6.18+ location
+      run: |
+        set -o pipefail
+        REPO_ROOT="$(pwd)"
+        LOG="$REPO_ROOT/$LOGFILE"
+
+        echo "=== Enforcing patches-6.18+ location ===" | tee -a "$LOG"
+
+        ATH79="$REPO_ROOT/openwrt/target/linux/ath79"
+
+        if [ ! -d "$ATH79" ]; then
+          echo "❌ ERROR: $ATH79 not found." | tee -a "$LOG"
+          exit 1
+        fi
+
+        # Find the highest existing patches-6.X where X >= 18
+        TARGET=""
+        HIGHEST=17
+        shopt -s nullglob
+        for d in "$ATH79"/patches-6.*/; do
+          [ -d "$d" ] || continue
+          d="${d%/}"
+          v="${d##*patches-6.}"
+          if [ "$v" -ge 18 ] 2>/dev/null && [ "$v" -gt "$HIGHEST" ]; then
+            HIGHEST="$v"
+            TARGET="$d"
+          fi
+        done
+        shopt -u nullglob
+
+        if [ -z "$TARGET" ]; then
+          TARGET="$ATH79/patches-6.18"
+          mkdir -p "$TARGET"
+          echo "ℹ️ No patches-6.18+ found; created '$TARGET'" | tee -a "$LOG"
+        fi
+
+        echo "Target patch directory: $TARGET" | tee -a "$LOG"
+
+        # Move our patches from any lower patches-6.X directory
+        shopt -s nullglob
+        for d in "$ATH79"/patches-6.*/; do
+          [ -d "$d" ] || continue
+          d="${d%/}"
+          [ "$d" = "$TARGET" ] && continue
+          v="${d##*patches-6.}"
+          if [ "$v" -lt 18 ] 2>/dev/null; then
+            for p in "$d"/731-*.patch "$d"/740-*.patch; do
+              [ -f "$p" ] || continue
+              b=$(basename "$p")
+              echo "Moving $p → $TARGET/$b" | tee -a "$LOG"
+              mv "$p" "$TARGET/$b"
+            done
+          fi
+        done
+        shopt -u nullglob
+
+        echo "=== Final state of patches-6.* directories ===" | tee -a "$LOG"
+        shopt -s nullglob
+        for d in "$ATH79"/patches-6.*/; do
+          [ -d "$d" ] || continue
+          d="${d%/}"
+          echo "--- $d ---" | tee -a "$LOG"
+          found=0
+          for pat in "$d"/731-*.patch "$d"/740-*.patch; do
+            if [ -f "$pat" ]; then
+              ls -la "$pat" | tee -a "$LOG"
+              found=1
+            fi
+          done
+          [ "$found" -eq 0 ] && echo "(no 731/740 patches here)" | tee -a "$LOG"
+        done
+        shopt -u nullglob
+
+        echo "✅ Patch location enforcement complete." | tee -a "$LOG"
 
     - name: Inject custom files
       if: ${{ github.event.inputs.include_files == 'true' }}
       run: |
-        echo "=== Injecting custom files ===" | tee -a "$LOGFILE"
+        set -o pipefail
+        echo "=== Injecting custom files (include_files=true) ===" | tee -a "$LOGFILE"
         if [ -d files ]; then
           mkdir -p openwrt/files
           cp -rv files/* openwrt/files/ 2>&1 | tee -a "$LOGFILE"
+          echo "✅ Custom files injected." | tee -a "$LOGFILE"
         else
-          echo "No 'files' directory found." | tee -a "$LOGFILE"
-        fi
-
-    - name: Import cfw-leds package into openwrt/package/utils/
-      if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
-      run: |
-        echo "=== Importing cfw-leds package ===" | tee -a "$LOGFILE"
-        CFW_REPO="https://github.com/haddad2inc/building-helper.git"
-        TARGET_PARENT="openwrt/package/utils"
-        TARGET_DIR="$TARGET_PARENT/cfw-leds"
-        TMP_DIR="/tmp/cfw-leds-src"
-
-        rm -rf "$TMP_DIR"
-        if git clone --depth 1 "$CFW_REPO" "$TMP_DIR" 2>&1 | tee -a "$LOGFILE"; then
-          echo "✅ Clone succeeded." | tee -a "$LOGFILE"
-        else
-          echo "❌ Clone FAILED." | tee -a "$LOGFILE"
+          echo "❌ ERROR: files/ not found at repo root." | tee -a "$LOGFILE"
           exit 1
         fi
 
-        rm -rf "$TMP_DIR/.git"
+    - name: Skip files notice
+      if: ${{ github.event.inputs.include_files != 'true' }}
+      run: |
+        echo "=== include_files=false → skipping custom files injection ===" | tee -a "$LOGFILE"
 
-        SRC_DIR="$TMP_DIR/cfw-leds"
+    # =====================================================================
+    # Import cfw-leds (from building-helper)
+    # =====================================================================
+    - name: Import cfw-leds package into openwrt/package/utils/
+      if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
+      run: |
+        set -o pipefail
+        echo "=== Importing cfw-leds package from building-helper ===" | tee -a "$LOGFILE"
+        SRC_DIR="/tmp/building-helper/cfw-leds"
+        TARGET_PARENT="openwrt/package/utils"
+        TARGET_DIR="$TARGET_PARENT/cfw-leds"
+
         if [ ! -d "$SRC_DIR" ]; then
-          echo "❌ ERROR: Expected subfolder '$SRC_DIR' not found." | tee -a "$LOGFILE"
-          ls -la "$TMP_DIR" | tee -a "$LOGFILE"
+          echo "❌ ERROR: '$SRC_DIR' not found in building-helper." | tee -a "$LOGFILE"
+          ls -la /tmp/building-helper | tee -a "$LOGFILE"
           exit 1
         fi
 
         mkdir -p "$TARGET_PARENT"
         rm -rf "$TARGET_DIR"
-
-        if cp -rv "$SRC_DIR" "$TARGET_PARENT"/ 2>&1 | tee -a "$LOGFILE"; then
-          echo "✅ Copy to $TARGET_PARENT succeeded." | tee -a "$LOGFILE"
-        else
-          echo "❌ Copy FAILED." | tee -a "$LOGFILE"
-          exit 1
-        fi
+        cp -rv "$SRC_DIR" "$TARGET_PARENT"/ 2>&1 | tee -a "$LOGFILE"
 
         chmod -R u+rwX,go+rX "$TARGET_DIR" 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>&1 | tee -a "$LOGFILE"
@@ -377,41 +710,27 @@ jobs:
 
         echo "✅ cfw-leds package import completed." | tee -a "$LOGFILE"
 
+    # =====================================================================
+    # Import luci-theme-enan-dashboard (from building-helper)
+    # =====================================================================
     - name: Import luci-theme-enan-dashboard package into openwrt/package/
       if: ${{ github.event.inputs.attach_theme == 'true' }}
       run: |
-        echo "=== Importing luci-theme-enan-dashboard package ===" | tee -a "$LOGFILE"
-        THEME_REPO="https://github.com/haddad2inc/building-helper.git"
+        set -o pipefail
+        echo "=== Importing luci-theme-enan-dashboard package from building-helper ===" | tee -a "$LOGFILE"
+        SRC_DIR="/tmp/building-helper/luci-theme-enan-dashboard"
         TARGET_PARENT="openwrt/package"
         TARGET_DIR="$TARGET_PARENT/luci-theme-enan-dashboard"
-        TMP_DIR="/tmp/cfw-theme-src"
 
-        rm -rf "$TMP_DIR"
-        if git clone --depth 1 "$THEME_REPO" "$TMP_DIR" 2>&1 | tee -a "$LOGFILE"; then
-          echo "✅ Clone succeeded." | tee -a "$LOGFILE"
-        else
-          echo "❌ Clone FAILED." | tee -a "$LOGFILE"
-          exit 1
-        fi
-
-        rm -rf "$TMP_DIR/.git"
-
-        SRC_DIR="$TMP_DIR/luci-theme-enan-dashboard"
         if [ ! -d "$SRC_DIR" ]; then
-          echo "❌ ERROR: Expected subfolder '$SRC_DIR' not found." | tee -a "$LOGFILE"
-          ls -la "$TMP_DIR" | tee -a "$LOGFILE"
+          echo "❌ ERROR: '$SRC_DIR' not found in building-helper." | tee -a "$LOGFILE"
+          ls -la /tmp/building-helper | tee -a "$LOGFILE"
           exit 1
         fi
 
         mkdir -p "$TARGET_PARENT"
         rm -rf "$TARGET_DIR"
-
-        if cp -rv "$SRC_DIR" "$TARGET_PARENT"/ 2>&1 | tee -a "$LOGFILE"; then
-          echo "✅ Copy to $TARGET_PARENT succeeded." | tee -a "$LOGFILE"
-        else
-          echo "❌ Copy FAILED." | tee -a "$LOGFILE"
-          exit 1
-        fi
+        cp -rv "$SRC_DIR" "$TARGET_PARENT"/ 2>&1 | tee -a "$LOGFILE"
 
         chmod -R u+rwX,go+rX "$TARGET_DIR" 2>&1 | tee -a "$LOGFILE"
         find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>&1 | tee -a "$LOGFILE"
@@ -428,8 +747,12 @@ jobs:
 
         echo "✅ luci-theme-enan-dashboard package import completed." | tee -a "$LOGFILE"
 
+    # =====================================================================
+    # .config handling
+    # =====================================================================
     - name: Copy .config and verify active options
       run: |
+        set -o pipefail
         echo "=== Copying .config from repository root to openwrt/ ===" | tee -a "$LOGFILE"
         cp -v .config openwrt/.config 2>&1 | tee -a "$LOGFILE"
 
@@ -519,6 +842,9 @@ jobs:
         echo "Branch input   : $OPENWRT_BRANCH_INPUT" | tee -a "$LOGFILE"
         echo "Git branch     : $OPENWRT_REF" | tee -a "$LOGFILE"
         echo "Git tag        : ${OPENWRT_TAG:-<none - snapshot>}" | tee -a "$LOGFILE"
+        echo "DTS choice     : ${{ github.event.inputs.dts_choice }}" | tee -a "$LOGFILE"
+        echo "Patch 731      : ${{ env.INCLUDE_731 }}" | tee -a "$LOGFILE"
+        echo "Patch 740      : ${{ env.INCLUDE_740 }}" | tee -a "$LOGFILE"
         echo "Build started at: $(date)" | tee -a "$LOGFILE"
         cd openwrt
         make -j$(nproc) V=s 2>&1 | tee -a "../$LOGFILE"
@@ -537,11 +863,9 @@ jobs:
           echo "❌ Directory bin/targets/ath79/generic/ does not exist!" | tee -a "../$LOGFILE"
         fi
 
-    # =======================================================================
-    # Collect artifacts (images, kernel, dtb, injected files, logs)
-    #   NOTE: This step must run BEFORE cleaning build_dir so we can capture
-    #         kernel / dtb / built objects.
-    # =======================================================================
+    # =====================================================================
+    # Collect artifacts
+    # =====================================================================
     - name: Collect artifacts (images, kernel, dtb, injected files, logs)
       if: always()
       run: |
@@ -587,11 +911,20 @@ jobs:
         [ -d package/utils/cfw-leds ] && cp -rv package/utils/cfw-leds out/injected/cfw-leds || true
         [ -d package/luci-theme-enan-dashboard ] && cp -rv package/luci-theme-enan-dashboard out/injected/luci-theme-enan-dashboard || true
 
-        # Bring in the build log
-        cp -v "../$LOGFILE" out/logs/ 2>/dev/null || true
+        # Capture final state of patches-6.* directories
+        mkdir -p out/injected/kernel-patches
+        find target/linux/ath79 -maxdepth 2 -path '*/patches-6.*/*.patch' -exec cp -v {} out/injected/kernel-patches/ \; 2>/dev/null || true
 
-        # sha256 of the produced images
+        cp -v "../$LOGFILE" out/logs/ 2>/dev/null || true
         sha256sum bin/targets/ath79/generic/*cf-wa350* > out/logs/40-sha256.txt 2>/dev/null || true
+
+        echo "=== Selected DTS / patch decisions ===" | tee out/logs/41-build-choices.txt
+        echo "DTS choice     : ${{ github.event.inputs.dts_choice }}" | tee -a out/logs/41-build-choices.txt
+        echo "include_files  : ${{ github.event.inputs.include_files }}" | tee -a out/logs/41-build-choices.txt
+        echo "patch_731 input: ${{ github.event.inputs.patch_731 }}" | tee -a out/logs/41-build-choices.txt
+        echo "patch_740 input: ${{ github.event.inputs.patch_740 }}" | tee -a out/logs/41-build-choices.txt
+        echo "INCLUDE_731    : ${INCLUDE_731:-<unset>}" | tee -a out/logs/41-build-choices.txt
+        echo "INCLUDE_740    : ${INCLUDE_740:-<unset>}" | tee -a out/logs/41-build-choices.txt
 
         echo "=== uImage kernel size (bytes 12..15, big endian) ===" | tee -a "../$LOGFILE"
         for img in out/images/*cf-wa350-squashfs-sysupgrade.bin; do
@@ -651,9 +984,6 @@ jobs:
         path: ${{ env.LOGFILE }}
         if-no-files-found: error
 
-    # -----------------------------------------------------------------------
-    # Upload the collected bundle (images + kernel + dtb + injected + logs)
-    # -----------------------------------------------------------------------
     - name: Upload collected artifact bundle (out/)
       if: always()
       uses: actions/upload-artifact@v4
@@ -662,9 +992,6 @@ jobs:
         path: openwrt/out/
         if-no-files-found: warn
 
-    # -----------------------------------------------------------------------
-    # Upload the raw firmware files (kept for compatibility / quick access)
-    # -----------------------------------------------------------------------
     - name: Upload firmware and all build artifacts
       if: always()
       uses: actions/upload-artifact@v4
