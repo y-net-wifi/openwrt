@@ -1,28 +1,42 @@
 # ============================================================================
-#  build-cf-wa350-commit.yml — Remote Build COMFAST CF-WA350
-#                              (Commit-pinned / Matrix Multi-Version)
+#  build-cf-wa350-commit.yml -- Remote Build COMFAST CF-WA350
+#                               (Commit-pinned / Matrix Multi-Version)
 #
-#  ماذا يضيف على الـ workflow الحالي:
-#    1) وضع «commit»: بناء من SHA محدد (افتراضياً رأس PR #25040
-#       949b9f785c85 من haddad2inc/openwrt) أو من أي كوميت عام
-#       (رسمي/فرع) — مع تحقق أن HEAD المطابق هو المطلوب فعلاً.
-#    2) خيار inject_dts: حقن dts/qca9563_comfast_cf-wa350.dts من هذا
-#       المستودع (y-net-wifi/openwrt) فوق نسخة الشجرة + تصنيف المتغير
-#       (INTERNAL-LEGACY / INTERNAL+MDIO-CHILD / EXTERNAL-MDIO) وبوابات
-#       تمنع التوليفات القاتلة قبل ضياع 3 ساعات بناء.
-#    3) خيار include_patch_731: استيراد الرقعة من building-helper/patches
-#       إلى target/linux/ath79/patches-6.* (يكتشف المجلد تلقائياً) مع
-#       بوابة ترفض النسخة المعطوبة (&mdio_bus_type غير مُصدَّر ⇒ فشل تصريف).
-#    4) بوابة cfw-leds: ترفض النسخة القديمة بأسماء ext_wan (شرطة سفلية).
-#    5) بطاقة هوية IDENTITY.txt تُجمع في out/logs/00-identity.txt —
-#       هوية البناء تُقرأ منها لا من اسم التشغيل ولا من banner التاريخ.
+#  What this adds over the classic "remote building.yml":
+#    1) commit mode: build from an exact SHA (default = PR #25040 head
+#       949b9f785c85 from haddad2inc/openwrt) or from any commit of the
+#       official repo -- with a hard check that HEAD == requested SHA.
+#    2) inject_dts: inject dts/<file> from THIS repo over the tree copy,
+#       then classify the variant (INTERNAL-LEGACY / INTERNAL+MDIO-CHILD /
+#       EXTERNAL-MDIO) and gate known-fatal combinations BEFORE the build.
+#    3) include_patch_731: import patches/731-*.patch (ar8216 internal-MDIO
+#       guard) from building-helper into target/linux/ath79/patches-6.*
+#       (auto-detected). Rejects the known non-compiling &mdio_bus_type
+#       revision.
+#    4) include_patch_740: import patches/740-*.patch (Macronix MX25L12805D
+#       hardcoded name/size restore) from building-helper. 6.18-only gate.
+#       NOTE: placing a .patch under target/linux/<target>/patches-<ver>/
+#       IS the injection -- the OpenWrt kernel build applies every patch in
+#       that directory automatically (quilt) during target/linux/compile.
+#    5) import_cfw_leds gate: rejects the stale underscore LED-name daemon
+#       (blue:ext_wan) which cannot drive the hyphenated sysfs LEDs.
+#    6) diag_kconfig: append CONFIG_LEDS_TRIGGER_PANIC=y + PANIC_TIMEOUT=10
+#       so the panic-indicator LED is actually usable on diagnostic builds.
+#    7) gcc13: pin GCC 13.4.0 (toolchain separator experiment).
+#    8) IDENTITY card (out/logs/00-identity.txt): base commit, kernel
+#       series, GCC, DTS sha+variant, patch 731/740 presence, cfw daemon
+#       sha. Build identity is read from this card -- never from artifact
+#       names or banner dates (SOURCE_DATE_EPOCH makes banners identical
+#       across rebuilds).
 #
-#  التوليفات النموذجية:
-#    أ) صورة الـ PR النهائية  : source_mode=commit (رأس PR) + inject_dts=✔ (legacy)
-#                               + include_patch_731=✘ + import_cfw_leds=✔
-#    ب) تجربة الصريح+731       : source_mode=commit + inject_dts=✔ (ارفع نسخة
-#                               explicit إلى dts/) + include_patch_731=✔ (النسخة المُصحَّحة فقط)
-#    ج) 25.12/snapshot كالقديم : source_mode=branch + enable_matrix كما تشاء
+#  Reference combinations:
+#    A) PR-candidate image : commit mode @ PR head + inject_dts (legacy)
+#                            + no 731 + no 740
+#    B) explicit+guard test : commit mode + explicit-mdio DTS + 731 (fixed
+#                            revision dcf96672... only)
+#    C) current-main test  : commit mode @ official master SHA
+#                            + run_apply_patches=true + inject_dts (legacy)
+#    D) classic releases    : branch mode (24.10 / 25.12 / snapshot)
 # ============================================================================
 name: Remote Build COMFAST CF-WA350 (Commit / Matrix)
 
@@ -30,7 +44,7 @@ on:
   workflow_dispatch:
     inputs:
       source_mode:
-        description: '🎯 المصدر: commit = SHA محدد | branch = فرع/وسم رسمي (كالقديم)'
+        description: 'Source: commit = pinned SHA | branch = official series (classic)'
         required: true
         default: 'commit'
         type: choice
@@ -38,7 +52,7 @@ on:
           - commit
           - branch
       source_repo:
-        description: 'commit mode: من أي مستودع يُجلب الكوميت'
+        description: 'commit mode: repository holding the commit'
         required: false
         default: 'pr-fork'
         type: choice
@@ -46,52 +60,52 @@ on:
           - pr-fork      # https://github.com/haddad2inc/openwrt.git
           - official     # https://git.openwrt.org/openwrt/openwrt.git
       openwrt_commit:
-        description: 'commit mode: الـ SHA (افتراضي = رأس PR #25040)'
+        description: 'commit mode: SHA to build (default = PR #25040 head)'
         required: false
         default: '949b9f785c85b32c8daa3acfb9ccd01ce221cae1'
         type: string
       run_apply_patches:
-        description: 'تشغيل apply_patches.py (مطلوب إذا كان الكوميت لا يحوي ملفات الجهاز — مثلاً main خام؛ في وضع branch يعمل دائماً)'
+        description: 'Run apply_patches.py (required when the base commit lacks CF-WA350 device files, e.g. bare master; always runs in branch mode)'
         required: false
         default: false
         type: boolean
       inject_dts:
-        description: '🌳 حقن DTS من هذا المستودع فوق الشجرة'
+        description: 'Inject the DTS file selected by dts_file from THIS repo over the tree copy'
         required: false
         default: true
         type: boolean
       dts_file:
-        description: '🌳 ملف الـ DTS المحقون (legacy افتراضياً؛ للتجربة الصريحة: dts/qca9563_comfast_cf-wa350-explicit-mdio.dts)'
+        description: 'DTS to inject (repo-relative). legacy default; explicit: dts/qca9563_comfast_cf-wa350-explicit-mdio.dts; diag: dts/wa350-*.dts'
         required: false
         default: 'dts/qca9563_comfast_cf-wa350.dts'
         type: string
+      include_patch_731:
+        description: 'Import patches/731-*.patch (ar8216 guard) from building-helper. Required ONLY for explicit-mdio DTS; legacy does not need it'
+        required: false
+        default: false
+        type: boolean
+      include_patch_740:
+        description: 'Import patches/740-*.patch (Macronix MX25L12805D name/size restore) from building-helper. 6.18-series builds only'
+        required: false
+        default: false
+        type: boolean
       allow_known_bad_combo:
-        description: '☠️ اسمح بتوليفة explicit-mdio بلا 731 (بناء شاهد سلبي متعمد — صورة حلقة إقلاع؛ للوحات التجارب فقط)'
+        description: 'DANGER: allow explicit-mdio DTS without 731 (deliberate negative-control build; expected boot-loop image; test boards only)'
         required: false
         default: false
         type: boolean
       diag_kconfig:
-        description: '💡 حقن سطحي التشخيص باللمبات (LEDS_TRIGGER_PANIC=y + PANIC_TIMEOUT=10) في kernel config — للبناء التشخيصي فقط'
+        description: 'Append CONFIG_LEDS_TRIGGER_PANIC=y + CONFIG_PANIC_TIMEOUT=10 to the ath79 kernel config (diagnostic LED builds only)'
         required: false
         default: false
         type: boolean
       gcc13:
-        description: '🧪 تثبيت GCC على 13.4.0 بدل الافتراضي 14.4.0 (تجربة عزل المُصرِّف)'
-        required: false
-        default: false
-        type: boolean
-      import_kernel_patches:
-        description: '🧩 استيراد كل building-helper/patches/*.patch إلى target/linux/ath79/patches-6.* (مثال: 740 لإصلاح Macronix MX25L12805D — لبنيات 6.18 فقط)'
-        required: false
-        default: false
-        type: boolean
-      include_patch_731:
-        description: '🩹 استيراد patches/731-*.patch من building-helper (لازم ONLY لمتغير explicit-mdio؛ legacy لا يحتاجه)'
+        description: 'Pin GCC to 13.4.0 instead of the tree default (toolchain separator experiment)'
         required: false
         default: false
         type: boolean
       openwrt_branch:
-        description: 'branch mode — Primary: OpenWrt branch'
+        description: 'branch mode - Primary: OpenWrt branch'
         required: false
         default: 'snapshot'
         type: choice
@@ -100,12 +114,12 @@ on:
           - '24.10'
           - '25.12'
       patch_version:
-        description: 'branch mode — Primary: Patch version (empty = latest)'
+        description: 'branch mode - Primary: patch version (empty = latest)'
         required: false
         default: ''
         type: string
       openwrt_branch_2:
-        description: 'branch mode — Secondary branch (مع enable_matrix فقط)'
+        description: 'branch mode - Secondary branch (with enable_matrix only)'
         required: false
         default: '25.12'
         type: choice
@@ -114,22 +128,22 @@ on:
           - '24.10'
           - '25.12'
       patch_version_2:
-        description: 'branch mode — Secondary patch version'
+        description: 'branch mode - Secondary: patch version'
         required: false
         default: ''
         type: string
       enable_matrix:
-        description: '⚡ Matrix: بناء نسختين بالتوازي (branch mode فقط — يُتجاهل في commit mode)'
+        description: 'Matrix: build two versions in parallel (branch mode only; ignored in commit mode)'
         required: false
         default: false
         type: boolean
       include_files:
-        description: 'Inject custom files from "files" directory'
+        description: 'Inject custom files from the "files" directory'
         required: false
         default: false
         type: boolean
       import_cfw_leds:
-        description: 'Import cfw-leds package from building-helper (بوابة ترفض النسخة القديمة)'
+        description: 'Import cfw-leds package from building-helper (gate rejects the stale underscore-name daemon)'
         required: false
         default: true
         type: boolean
@@ -158,11 +172,11 @@ jobs:
           COMMIT_IN="${{ github.event.inputs.openwrt_commit }}"
           if [ "$MODE" = "commit" ]; then
             if ! echo "$COMMIT_IN" | grep -qE '^[0-9a-fA-F]{7,40}$'; then
-              echo "❌ openwrt_commit ليس SHA صالحاً: '$COMMIT_IN'"; exit 1
+              echo "ERROR: openwrt_commit is not a valid SHA: '$COMMIT_IN'"; exit 1
             fi
             SHORT=$(echo "$COMMIT_IN" | cut -c1-12)
             if [ "${{ github.event.inputs.enable_matrix }}" = "true" ]; then
-              echo "⚠️ enable_matrix متجاهَل في وضع commit (بناء واحد فقط)."
+              echo "NOTE: enable_matrix is ignored in commit mode (single build)."
             fi
             MATRIX=$(jq -n --arg s "$SHORT" \
               '{include:[{slot:"commit",branch:"",patch:"",label:$s}]}')
@@ -221,16 +235,14 @@ jobs:
           case "${{ github.event.inputs.source_repo }}" in
             pr-fork)  SEL="$REPO_URL_FORK" ;;
             official) SEL="$REPO_URL_OFFICIAL" ;;
-            *) echo "❌ source_repo غير معروف"; exit 1 ;;
+            *) echo "ERROR: unknown source_repo"; exit 1 ;;
           esac
-          echo "OPENWRT_REPO=$SEL"        >> "$GITHUB_ENV"
-          echo "OPENWRT_COMMIT=$COMMIT_IN" >> "$GITHUB_ENV"
-          echo "OPENWRT_TAG="              >> "$GITHUB_ENV"
+          echo "OPENWRT_REPO=$SEL"             >> "$GITHUB_ENV"
+          echo "OPENWRT_COMMIT=$COMMIT_IN"     >> "$GITHUB_ENV"
+          echo "OPENWRT_TAG="                  >> "$GITHUB_ENV"
           echo "OPENWRT_REF=commit:$COMMIT_IN" >> "$GITHUB_ENV"
           echo "OPENWRT_LABEL=${{ matrix.label }}" >> "$GITHUB_ENV"
-          echo "=== commit mode ==="
-          echo "Repo  : $SEL"
-          echo "Commit: $COMMIT_IN"
+          echo "=== commit mode ==="; echo "Repo  : $SEL"; echo "Commit: $COMMIT_IN"
         else
           BRANCH_INPUT="${{ matrix.branch }}"
           PATCH_INPUT="${{ matrix.patch }}"
@@ -238,7 +250,7 @@ jobs:
             snapshot) REF="master"; SERIES="" ;;
             24.10)    REF="openwrt-24.10"; SERIES="24.10" ;;
             25.12)    REF="openwrt-25.12"; SERIES="25.12" ;;
-            *) echo "❌ Unknown branch '$BRANCH_INPUT'"; exit 1 ;;
+            *) echo "ERROR: unknown branch '$BRANCH_INPUT'"; exit 1 ;;
           esac
           if [ "$BRANCH_INPUT" = "snapshot" ]; then
             TAG=""
@@ -249,13 +261,13 @@ jobs:
             LATEST_TAG=$(git ls-remote --tags "$REPO_URL_OFFICIAL" "v${SERIES}.*" 2>/dev/null \
               | awk -F'refs/tags/' '{print $2}' | grep -v '\^{}' \
               | grep -E "^v${SERIES}\.[0-9]+$" | sort -V | tail -n1)
-            [ -z "$LATEST_TAG" ] && { echo "❌ No tag for series '$SERIES'"; exit 1; }
+            [ -z "$LATEST_TAG" ] && { echo "ERROR: no tag for series '$SERIES'"; exit 1; }
             TAG="$LATEST_TAG"
           fi
           echo "OPENWRT_REPO=$REPO_URL_OFFICIAL" >> "$GITHUB_ENV"
-          echo "OPENWRT_COMMIT=" >> "$GITHUB_ENV"
-          echo "OPENWRT_REF=$REF"  >> "$GITHUB_ENV"
-          echo "OPENWRT_TAG=$TAG"  >> "$GITHUB_ENV"
+          echo "OPENWRT_COMMIT="                 >> "$GITHUB_ENV"
+          echo "OPENWRT_REF=$REF"                >> "$GITHUB_ENV"
+          echo "OPENWRT_TAG=$TAG"                >> "$GITHUB_ENV"
           echo "OPENWRT_LABEL=${{ matrix.label }}" >> "$GITHUB_ENV"
           echo "=== branch mode === ref=$REF tag=${TAG:-<none>}"
         fi
@@ -284,13 +296,13 @@ jobs:
         git commit -m "Init ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
         for attempt in 1 2 3 4 5; do
           git pull --rebase origin main 2>/dev/null || true
-          git push origin main 2>/dev/null && { echo "✅ Log pushed"; break; }
+          git push origin main 2>/dev/null && { echo "Log pushed"; break; }
           sleep 5
         done
 
     - name: Check if .config exists in repo root
       run: |
-        [ -f .config ] && echo "✅ .config found" || { echo "❌ .config missing"; exit 1; }
+        [ -f .config ] && echo ".config found" || { echo "ERROR: .config missing"; exit 1; }
 
     - name: Initialize environment
       run: |
@@ -314,8 +326,8 @@ jobs:
           git checkout FETCH_HEAD 2>&1 | tee -a "../$LOGFILE"
           ACTUAL=$(git rev-parse HEAD)
           case "$ACTUAL" in
-            ${OPENWRT_COMMIT}*|*"${OPENWRT_COMMIT}"*) : ;;
-            *) echo "❌ HEAD=$ACTUAL لا يطابق المطلوب $OPENWRT_COMMIT"; exit 1 ;;
+            ${OPENWRT_COMMIT}*) : ;;
+            *) echo "ERROR: HEAD=$ACTUAL != requested $OPENWRT_COMMIT"; exit 1 ;;
           esac
           echo "=== Pinned commit ===" | tee -a "../$LOGFILE"
           git log -1 --format='commit  %H%ndate    %cs%nsubject %s' | tee -a "../$LOGFILE"
@@ -341,50 +353,50 @@ jobs:
         ./scripts/feeds update -a 2>&1 | tee -a "../$LOGFILE"
         ./scripts/feeds install -a 2>&1 | tee -a "../$LOGFILE"
 
-    - name: Apply patches via Python script (branch mode / run_apply_patches)
+    - name: Apply patches via apply_patches.py (branch mode or run_apply_patches)
       if: ${{ github.event.inputs.source_mode == 'branch' || github.event.inputs.run_apply_patches == 'true' }}
       run: |
         echo "=== Applying patches ===" | tee -a "$LOGFILE"
         python3 apply_patches.py 2>&1 | tee -a "$LOGFILE"
 
-    - name: Skip apply_patches (commit mode carries device files in-tree)
+    - name: Verify device files exist in-tree (commit mode without apply_patches)
       if: ${{ github.event.inputs.source_mode == 'commit' && github.event.inputs.run_apply_patches != 'true' }}
       run: |
         echo "=== apply_patches.py SKIPPED: base commit carries the device files ===" | tee -a "$LOGFILE"
         if ! grep -rq "comfast_cf-wa350" openwrt/target/linux/ath79/image/generic.mk; then
-          echo "❌ الكوميت لا يحوي تعريف الجهاز في generic.mk — فعّل run_apply_patches" | tee -a "$LOGFILE"
+          echo "ERROR: comfast_cf-wa350 missing in generic.mk -- enable run_apply_patches for bare-master commits" | tee -a "$LOGFILE"
           exit 1
         fi
-        echo "✅ generic.mk يحتوي comfast_cf-wa350" | tee -a "$LOGFILE"
+        echo "OK: generic.mk contains comfast_cf-wa350" | tee -a "$LOGFILE"
 
-    - name: 🌳 Inject DTS from this repo (+ variant classification & gates)
+    - name: Inject DTS from this repo (+ variant classification & gates)
       if: ${{ github.event.inputs.inject_dts == 'true' }}
       run: |
         set -u
         SRC="${{ github.event.inputs.dts_file }}"
         [ -n "$SRC" ] || SRC="dts/qca9563_comfast_cf-wa350.dts"
         DST="openwrt/target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts"
-        [ -f "$SRC" ] || { echo "❌ $SRC غير موجود في هذا المستودع"; exit 1; }
-        echo "DTS source file: $SRC" | tee -a "$LOGFILE"
+        [ -f "$SRC" ] || { echo "ERROR: $SRC not found in this repository"; exit 1; }
         cp -v "$SRC" "$DST" 2>&1 | tee -a "$LOGFILE"
         SHA=$(sha256sum "$DST" | cut -d' ' -f1)
         INT=$(grep -c 'phy-mode = "internal"' "$DST" || true)
         PH=$(grep -c 'phy-handle *=' "$DST" || true)
         MD=$(grep -cE '^[[:space:]]+mdio \{' "$DST" || true)
-        if [ "$MD" -ge 1 ] && [ "$INT" -ge 1 ]; then
-          VARIANT="INTERNAL+MDIO-CHILD"
-        elif [ "$INT" -ge 1 ] && [ "$PH" -eq 0 ]; then
-          VARIANT="INTERNAL-LEGACY"
-        elif [ "$PH" -ge 1 ] && [ "$INT" -eq 0 ]; then
-          VARIANT="EXTERNAL-MDIO"
-        else
-          VARIANT="UNKNOWN"
-        fi
+        if   [ "$MD" -ge 1 ] && [ "$INT" -ge 1 ]; then VARIANT="INTERNAL+MDIO-CHILD"
+        elif [ "$INT" -ge 1 ] && [ "$PH" -eq 0 ]; then VARIANT="INTERNAL-LEGACY"
+        elif [ "$PH" -ge 1 ] && [ "$INT" -eq 0 ]; then VARIANT="EXTERNAL-MDIO"
+        else VARIANT="UNKNOWN"; fi
         case "$SHA" in
-          1544a5482fabf497*) KNOWN="known: INTERNAL-LEGACY canonical (هدف PR #25040)" ;;
-          a755306340109abe*) KNOWN="known: INTERNAL+MDIO-CHILD canonical (تتطلب 731)" ;;
-          c7cd13705d797229*) KNOWN="known: EXTERNAL-MDIO (رأس الـ PR الحالي)" ;;
-          *) KNOWN="UNKNOWN sha — تحقق من التصنيف يدوياً" ;;
+          1544a5482fabf497*) KNOWN="known: INTERNAL-LEGACY canonical (PR #25040 target)" ;;
+          a755306340109abe*) KNOWN="known: INTERNAL+MDIO-CHILD canonical (requires 731)" ;;
+          c7cd13705d797229*) KNOWN="known: EXTERNAL-MDIO (current PR head)" ;;
+          6c2ebe674de5f9f7*) KNOWN="known: L0 diagnostic (legacy + LED lamps)" ;;
+          c60e1771085bb093*) KNOWN="known: L1 diagnostic (legacy, radios disabled)" ;;
+          57861290b65f85ab*) KNOWN="known: L2 diagnostic (legacy, mdio disabled)" ;;
+          6dc75d33455c71a8*) KNOWN="known: X0L diagnostic (external + LED lamps)" ;;
+          04af7daeb922a232*) KNOWN="known: X1 diagnostic (external, radios disabled)" ;;
+          9476ce06f6907894*) KNOWN="known: W0 diagnostic (legacy, watchdog disabled)" ;;
+          *) KNOWN="UNRECOGNIZED sha -- verify the classification manually" ;;
         esac
         {
         echo "=== DTS identity ==="
@@ -392,109 +404,116 @@ jobs:
         echo "sha256  : $SHA  ($KNOWN)"
         echo "variant : $VARIANT  (internal:$INT phy-handle:$PH mdio-child:$MD)"
         } | tee -a "$LOGFILE"
-        echo "DTS_SHA=$SHA"       >> "$GITHUB_ENV"
+        echo "DTS_SHA=$SHA"         >> "$GITHUB_ENV"
         echo "DTS_VARIANT=$VARIANT" >> "$GITHUB_ENV"
         P731="${{ github.event.inputs.include_patch_731 }}"
         case "$VARIANT" in
           UNKNOWN)
-            echo "❌ لا أستطيع تصنيف الـ DTS — أوقف قبل إضاعة ساعات البناء"; exit 1 ;;
+            echo "ERROR: cannot classify the DTS -- aborting before wasting build hours"; exit 1 ;;
           "INTERNAL+MDIO-CHILD")
             if [ "$P731" != "true" ]; then
               if [ "${{ github.event.inputs.allow_known_bad_combo }}" = "true" ]; then
-                echo "☠️☠️ بناء شاهد سلبي متعمد: explicit-mdio بلا 731."
-                echo "   الصورة الناتجة يُتوقع أن تدخل حلقة إقلاع — لا تومضها إلا على لوحة"
-                echo "   تجربية (B) مع طريق استرجاع مؤكد (u-boot recovery 192.168.1.1)."
+                echo "DANGER: deliberate negative-control build (explicit mdio child WITHOUT 731)."
+                echo "        The image is expected to boot-loop; flash it only on a test board"
+                echo "        with a proven u-boot recovery path (192.168.1.1)."
               else
-                echo "❌ DTS بعقدة mdio ابنة (عناوين PHY داخلية 0/1) بلا include_patch_731"
-                echo "   = توليفة حلقة الإقلاع المعروفة (ar8216 + 730 فوق qca8k MDIO master)."
-                echo "   فعّل include_patch_731، أو استعمل نسخة legacy، أو (لشاهد سلبي متعمد)"
-                echo "   فعّل allow_known_bad_combo."; exit 1
+                echo "ERROR: explicit 'mdio' child puts port PHYs at internal addresses 0/1;"
+                echo "       ar8216 (built in on ath79) then probes address 0 through qca8k's"
+                echo "       MDIO master under local_irq_save() (patch 730) => boot-loop."
+                echo "       Enable include_patch_731, or use the legacy DTS, or set"
+                echo "       allow_known_bad_combo=true for a deliberate negative control."; exit 1
               fi
             fi ;;
           "INTERNAL-LEGACY")
             if [ "$P731" = "true" ]; then
-              echo "⚠️ 731 مفعّلة مع legacy — غير ضارة لكنها غير لازمة (العنوانان 1/2 خارج مرشّح ar8216)."
+              echo "NOTE: 731 with the legacy layout is harmless but unnecessary (ports"
+              echo "      enumerate at addresses 1/2 which the ar8216 filter rejects)."
             else
-              echo "✅ legacy internal بلا 731 — التوليفة الصحيحة (لا اعتماد على رقعة نواة)"
+              echo "OK: legacy internal layout without 731 -- no kernel patch dependency."
             fi ;;
           "EXTERNAL-MDIO")
-            echo "ℹ️ external: ar8216 سيسجّل swconfig وهمياً ثم يفشل بـ -EINVAL (رسالتا إقلاع تجميليتان)." ;;
+            echo "NOTE: external layout -- ar8216 registers a bogus swconfig switch and"
+            echo "      fails with -EINVAL (two cosmetic boot messages)." ;;
         esac
 
-    - name: 🩹 Import patch 731 from building-helper (+ compile-safety gate)
+    - name: Import kernel patch 731 (ar8216 internal-MDIO guard) from building-helper
       if: ${{ github.event.inputs.include_patch_731 == 'true' }}
       run: |
         set -u
-        TMP=/tmp/helper-731
-        rm -rf "$TMP"
+        TMP=/tmp/helper-731; rm -rf "$TMP"
         git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
         P=$(ls "$TMP"/patches/731-*.patch 2>/dev/null | head -1)
-        [ -n "$P" ] || { echo "❌ لا توجد patches/731-*.patch في building-helper"; exit 1; }
+        [ -n "$P" ] || { echo "ERROR: patches/731-*.patch not found in building-helper"; exit 1; }
         if grep -q '&mdio_bus_type' "$P"; then
-          echo "❌ هذه النسخة تستعمل &mdio_bus_type — رمز خاص بـ phylib وغير مُصدَّر"
-          echo "   (مُعلَن فقط في drivers/net/phy/phylib-internal.h) ⇒ فشل تصريف مؤكد:"
-          echo "   error: 'mdio_bus_type' undeclared."
-          echo "   النسخة المعطوبة sha256=f53aaec6… (3091 B). المطلوب النسخة المُصحَّحة"
-          echo "   sha256=dcf96672… (3952 B) التي تتعرف على الباص بالاسم \"mdio_bus\"."
-          echo "   استبدل الملف في building-helper/patches/ ثم أعد التشغيل."; exit 1
+          echo "ERROR: this 731 revision references &mdio_bus_type -- a phylib-private"
+          echo "       symbol declared only in drivers/net/phy/phylib-internal.h and NOT"
+          echo "       exported => guaranteed compile failure ('mdio_bus_type' undeclared)."
+          echo "       Broken revision: sha256 f53aaec6... (3091 B)."
+          echo "       Required revision: sha256 dcf96672... (3952 B) which matches the"
+          echo "       bus by name (\"mdio_bus\"). Replace the file in building-helper."
+          exit 1
         fi
         PDIR=$(ls -d openwrt/target/linux/ath79/patches-6.* 2>/dev/null | sort -V | tail -1)
-        [ -n "$PDIR" ] || { echo "❌ لا يوجد مجلد patches-6.* في target/linux/ath79"; exit 1; }
+        [ -n "$PDIR" ] || { echo "ERROR: no target/linux/ath79/patches-6.* directory"; exit 1; }
         cp -v "$P" "$PDIR/" 2>&1 | tee -a "$LOGFILE"
         sha256sum "$PDIR"/731-*.patch | tee -a "$LOGFILE"
         echo "P731_DIR=$PDIR" >> "$GITHUB_ENV"
         echo "P731_SHA=$(sha256sum "$P" | cut -d' ' -f1)" >> "$GITHUB_ENV"
-        echo "✅ 731 installed into $PDIR" | tee -a "$LOGFILE"
+        echo "OK: 731 installed into $PDIR (OpenWrt applies patches-*/ automatically)"
 
-    - name: 🧩 Import all kernel patches from building-helper/patches
-      if: ${{ github.event.inputs.import_kernel_patches == 'true' }}
+    - name: Import kernel patch 740 (Macronix MX25L12805D geometry) from building-helper
+      if: ${{ github.event.inputs.include_patch_740 == 'true' }}
       run: |
         set -u
-        TMP=/tmp/helper-patches; rm -rf "$TMP"
+        KP=$(grep -m1 'KERNEL_PATCHVER' openwrt/target/linux/ath79/Makefile | cut -d'=' -f2 | tr -d ' ')
+        if [ "$KP" != "6.18" ]; then
+          echo "ERROR: 740 restores the MX25L12805D entry as of v6.18.52 macronix.c;"
+          echo "       this tree is KERNEL_PATCHVER=$KP -- the context will not apply."
+          exit 1
+        fi
+        TMP=/tmp/helper-740; rm -rf "$TMP"
         git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
+        P=$(ls "$TMP"/patches/740-*.patch 2>/dev/null | head -1)
+        [ -n "$P" ] || { echo "ERROR: patches/740-*.patch not found in building-helper"; exit 1; }
         PDIR=$(ls -d openwrt/target/linux/ath79/patches-6.* 2>/dev/null | sort -V | tail -1)
-        [ -n "$PDIR" ] || { echo "❌ لا يوجد مجلد patches-6.*"; exit 1; }
-        N=0
-        for f in "$TMP"/patches/*.patch; do
-          [ -e "$f" ] || continue
-          if grep -q '&mdio_bus_type' "$f"; then
-            echo "❌ $(basename "$f") تستعمل &mdio_bus_type (رمز phylib الخاص غير المُصدَّر) ⇒ فشل تصريف مؤكد."
-            echo "   احذف النسخة المعطوبة من building-helper/patches أو استبدلها بالمُصحَّحة (dcf96672…)."; exit 1
-          fi
-          cp -v "$f" "$PDIR/" 2>&1 | tee -a "$LOGFILE"
-          N=$((N+1))
-        done
-        [ "$N" -ge 1 ] || { echo "❌ building-helper/patches فارغ"; exit 1; }
-        sha256sum "$PDIR"/*.patch | tee -a "$LOGFILE"
-        echo "EXTRA_PATCHES=$N" >> "$GITHUB_ENV"
-        echo "✅ $N kernel patch(es) imported into $PDIR"
+        cp -v "$P" "$PDIR/" 2>&1 | tee -a "$LOGFILE"
+        SHA740=$(sha256sum "$P" | cut -d' ' -f1)
+        sha256sum "$PDIR"/740-*.patch | tee -a "$LOGFILE"
+        case "$SHA740" in
+          154afb7c775980cd*) echo "OK: 740 matches the validated revision (applies clean on v6.18.52)" ;;
+          *) echo "NOTE: 740 sha $SHA740 differs from the validated 154afb7c... -- review it" ;;
+        esac
+        echo "P740_DIR=$PDIR" >> "$GITHUB_ENV"
+        echo "P740_SHA=$SHA740" >> "$GITHUB_ENV"
 
-    - name: Import cfw-leds from building-helper (+ underscore-name gate)
+    - name: Import cfw-leds from building-helper (+ stale-daemon gate)
       if: ${{ github.event.inputs.import_cfw_leds != 'false' }}
       run: |
         set -u
         TMP=/tmp/cfw-src; rm -rf "$TMP"
         git clone --depth 1 "$HELPER_REPO" "$TMP" 2>&1 | tee -a "$LOGFILE"
         SRC="$TMP/cfw-leds"
-        [ -d "$SRC" ] || { echo "❌ cfw-leds/ غير موجودة في building-helper"; exit 1; }
+        [ -d "$SRC" ] || { echo "ERROR: cfw-leds/ not found in building-helper"; exit 1; }
         TARGET_PARENT="openwrt/package/utils"; TARGET_DIR="$TARGET_PARENT/cfw-leds"
         mkdir -p "$TARGET_PARENT"; rm -rf "$TARGET_DIR"
         cp -r "$SRC" "$TARGET_PARENT"/
         find "$TARGET_DIR" -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
         find "$TARGET_DIR/files" -type f -exec chmod +x {} \; 2>/dev/null || true
         CTRL="$TARGET_DIR/files/cfw_led_ctrl"
-        [ -f "$CTRL" ] || { echo "❌ files/cfw_led_ctrl غير موجود"; exit 1; }
+        [ -f "$CTRL" ] || { echo "ERROR: files/cfw_led_ctrl missing"; exit 1; }
         if grep -q 'blue:ext_wan\|blue:ext_lan\|blue:ext_wlan2g' "$CTRL"; then
-          echo "❌ نسخة cfw_led_ctrl قديمة (أسماء بشرطة سفلية ext_wan/ext_lan/ext_wlan2g)."
-          echo "   أسماء sysfs الحقيقية واصلة: blue:ext-wan … ⇒ اللمبات الخارجية لن تعمل."
-          echo "   المطلوب نسخة رأس الـ PR (12112 B, sha256=5f5eabad…)."; exit 1
+          echo "ERROR: stale cfw_led_ctrl (underscore LED names blue:ext_wan/...)."
+          echo "       Real sysfs names are hyphenated (blue:ext-wan ...) -- the daemon"
+          echo "       would write to non-existent paths and the external LEDs stay dark."
+          echo "       Required: PR-head revision, 12112 B, sha256 5f5eabad..."
+          exit 1
         fi
         [ -f "$TARGET_DIR/files/cfw_leds.init" ] && \
-          echo "⚠️ بقية قديمة: files/cfw_leds.init (الاسم القديم) — احذفها من building-helper (المستعمل files/cfw-leds.init)"
+          echo "NOTE: leftover old files/cfw_leds.init -- remove it from building-helper (used file is files/cfw-leds.init)"
         CFW_SHA=$(sha256sum "$CTRL" | cut -d' ' -f1)
         echo "cfw_led_ctrl: $(stat -c%s "$CTRL") bytes sha256=$CFW_SHA" | tee -a "$LOGFILE"
         echo "CFW_SHA=$CFW_SHA" >> "$GITHUB_ENV"
-        echo "✅ cfw-leds imported (hyphenated names verified)"
+        echo "OK: cfw-leds imported (hyphenated LED names verified)"
 
     - name: Import luci-theme-enan-dashboard
       if: ${{ github.event.inputs.attach_theme == 'true' }}
@@ -502,30 +521,16 @@ jobs:
         TMP=/tmp/theme-src; rm -rf "$TMP"
         git clone --depth 1 "$HELPER_REPO" "$TMP"
         SRC="$TMP/luci-theme-enan-dashboard"
-        [ -d "$SRC" ] || { echo "❌ theme folder missing"; exit 1; }
+        [ -d "$SRC" ] || { echo "ERROR: theme folder missing"; exit 1; }
         mkdir -p openwrt/package; rm -rf openwrt/package/luci-theme-enan-dashboard
         cp -r "$SRC" openwrt/package/
-        echo "✅ theme imported" | tee -a "$LOGFILE"
+        echo "OK: theme imported" | tee -a "$LOGFILE"
 
     - name: Inject custom files
       if: ${{ github.event.inputs.include_files == 'true' }}
       run: |
         if [ -d files ]; then mkdir -p openwrt/files; cp -rv files/* openwrt/files/ 2>&1 | tee -a "$LOGFILE"
         else echo "No 'files' directory found." | tee -a "$LOGFILE"; fi
-
-    - name: 💡 Inject diagnostic kernel config (panic lamp)
-      if: ${{ github.event.inputs.diag_kconfig == 'true' }}
-      run: |
-        KCFG="openwrt/target/linux/ath79/config-6.18"
-        [ -f "$KCFG" ] || KCFG="openwrt/target/linux/ath79/config-6.12"
-        [ -f "$KCFG" ] || { echo "❌ لا يوجد kernel config لـ ath79"; exit 1; }
-        sed -i '/CONFIG_LEDS_TRIGGER_PANIC/d;/CONFIG_PANIC_TIMEOUT/d' "$KCFG"
-        printf 'CONFIG_LEDS_TRIGGER_PANIC=y\nCONFIG_PANIC_TIMEOUT=10\n' >> "$KCFG"
-        echo "=== diag kconfig appended to $KCFG ===" | tee -a "$LOGFILE"
-        tail -3 "$KCFG" | tee -a "$LOGFILE"
-        echo "DIAG_KCONFIG=1 ($KCFG)" >> "$GITHUB_ENV"
-        echo "⚠️ تحقق بعد البناء أن out/kernel/kernel-dot-config يحوي PANIC_TIMEOUT=10"
-        echo "   (إن بقي =1 فالتجاوز لم ينجح — انقل السطرين إلى target/linux/generic/config-6.18)"
 
     - name: Copy .config and verify active options
       run: |
@@ -538,7 +543,7 @@ jobs:
           echo "CONFIG_TOOLCHAINOPTS=y" >> .config
           sed -i '/^CONFIG_GCC_USE_VERSION/d;/^# CONFIG_GCC_USE_VERSION/d' .config
           echo "CONFIG_GCC_USE_VERSION_13=y" >> .config
-          echo "🧪 GCC pinned to 13.4.0 (separator experiment)" | tee -a "../$LOGFILE"
+          echo "EXPERIMENT: GCC pinned to 13.4.0 (toolchain separator)" | tee -a "../$LOGFILE"
         fi
         if [ "${{ github.event.inputs.attach_theme }}" = "true" ]; then
           sed -i '/^CONFIG_PACKAGE_luci-theme-enan-dashboard=/d' .config
@@ -554,16 +559,30 @@ jobs:
         make defconfig     2>&1 | tee -a "../$LOGFILE"
         cp .config config-after.txt
         if ! grep -q "CONFIG_TARGET_ath79_generic_DEVICE_comfast_cf-wa350=y" .config; then
-          echo "⚠️ Re-adding target device..." | tee -a "../$LOGFILE"
+          echo "WARN: re-adding target device..." | tee -a "../$LOGFILE"
           echo "CONFIG_TARGET_ath79=y" >> .config
           echo "CONFIG_TARGET_ath79_generic=y" >> .config
           echo "CONFIG_TARGET_ath79_generic_DEVICE_comfast_cf-wa350=y" >> .config
           make defconfig 2>&1 | tee -a "../$LOGFILE"
           cp .config config-after.txt
         fi
-        echo "✅ .config verification completed." | tee -a "../$LOGFILE"
+        echo "OK: .config verification completed." | tee -a "../$LOGFILE"
 
-    - name: 🪪 Build identity card (IDENTITY.txt)
+    - name: Append diagnostic kernel config (panic lamp)
+      if: ${{ github.event.inputs.diag_kconfig == 'true' }}
+      run: |
+        KCFG="openwrt/target/linux/ath79/config-6.18"
+        [ -f "$KCFG" ] || KCFG="openwrt/target/linux/ath79/config-6.12"
+        [ -f "$KCFG" ] || { echo "ERROR: no ath79 kernel config fragment found"; exit 1; }
+        sed -i '/CONFIG_LEDS_TRIGGER_PANIC/d;/CONFIG_PANIC_TIMEOUT/d' "$KCFG"
+        printf 'CONFIG_LEDS_TRIGGER_PANIC=y\nCONFIG_PANIC_TIMEOUT=10\n' >> "$KCFG"
+        echo "=== diag kconfig appended to $KCFG ===" | tee -a "$LOGFILE"
+        tail -3 "$KCFG" | tee -a "$LOGFILE"
+        echo "DIAG_KCONFIG=1 ($KCFG)" >> "$GITHUB_ENV"
+        echo "REMINDER: after the build verify out/kernel/kernel-dot-config contains"
+        echo "          CONFIG_PANIC_TIMEOUT=10 (target config must override generic)."
+
+    - name: Build identity card (IDENTITY.txt)
       run: |
         cd openwrt
         KP=$(grep -m1 'KERNEL_PATCHVER' target/linux/ath79/Makefile | cut -d'=' -f2)
@@ -581,14 +600,14 @@ jobs:
         echo "gcc (config)   : ${GCCV:-?}"
         echo "DTS sha256     : ${DTS_SHA:-<not injected - in-tree>}"
         echo "DTS variant    : ${DTS_VARIANT:-<in-tree>}"
-        if [ -n "${DTS_SHA:-}" ]; then :; else
+        if [ -z "${DTS_SHA:-}" ]; then
           sha256sum target/linux/ath79/dts/qca9563_comfast_cf-wa350.dts | cut -d' ' -f1 | sed 's/^/in-tree DTS sha: /'
         fi
         echo "patch 731      : ${P731_SHA:-ABSENT} ${P731_DIR:+in $P731_DIR}"
-        echo "cfw_led_ctrl   : ${CFW_SHA:-<not imported>}"
+        echo "patch 740      : ${P740_SHA:-ABSENT} ${P740_DIR:+in $P740_DIR}"
         echo "diag kconfig   : ${DIAG_KCONFIG:-off}"
-        echo "kernel patches : ${EXTRA_PATCHES:-0} imported (see log for sha256)"
         echo "gcc pin        : $([ "${{ github.event.inputs.gcc13 }}" = "true" ] && echo '13.4.0 (pinned)' || echo 'default')"
+        echo "cfw_led_ctrl   : ${CFW_SHA:-<not imported>}"
         grep -E '^CONFIG_PACKAGE_(kmod-dsa-qca8k|kmod-phy-qca83xx|cfw-leds)=|^# CONFIG_PACKAGE_swconfig ' .config | sed 's/^/config: /'
         echo "================================================"
         } | tee -a "../$LOGFILE" | tee ../IDENTITY.txt
@@ -617,7 +636,7 @@ jobs:
         echo "Slot           : ${{ matrix.slot }}"
         echo "Label          : ${{ matrix.label }}"
         echo "Source mode    : $SOURCE_MODE"
-        echo "Base commit    : ${OPENWRT_COMMIT_FULL:-$OPENWRT_REF} ${OPENWRT_TAG:-}"
+        echo "Base commit    : ${OPENWRT_COMMIT_FULL:-$OPENWRT_REF ${OPENWRT_TAG:-}}"
         echo "Build started at: $(date)"
         } | tee -a "$LOGFILE"
         cd openwrt
@@ -632,7 +651,7 @@ jobs:
         if [ -d bin/targets/ath79/generic/ ]; then
           ls -la bin/targets/ath79/generic/ 2>&1 | tee -a "../$LOGFILE"
         else
-          echo "❌ Directory bin/targets/ath79/generic/ does not exist!" | tee -a "../$LOGFILE"
+          echo "ERROR: bin/targets/ath79/generic/ does not exist!" | tee -a "../$LOGFILE"
         fi
 
     - name: Collect artifacts (images, kernel, dtb, injected, identity, logs)
@@ -673,7 +692,7 @@ jobs:
         cp -v .config                                                           out/injected/dot-config 2>/dev/null || true
         for f in target/linux/ath79/patches-6.*/*.patch; do
           case "$(basename "$f")" in
-            70*|71*|72*|730-*|8*|9*) : ;;   # رقع الشجرة القياسية
+            70*|71*|72*|730-*|8*|9*) : ;;   # standard tree patches
             *) cp -v "$f" out/injected/ 2>/dev/null || true ;;
           esac
         done
@@ -684,7 +703,7 @@ jobs:
         sha256sum bin/targets/ath79/generic/*cf-wa350* > out/logs/40-sha256.txt 2>/dev/null || true
         find out -type f | sort | sed 's|^|  |' | tee out/logs/50-bundle-list.txt
         du -sh out/* 2>/dev/null | tee -a out/logs/50-bundle-list.txt
-        echo "✅ Artifacts collected into openwrt/out/" | tee -a "../$LOGFILE"
+        echo "OK: artifacts collected into openwrt/out/" | tee -a "../$LOGFILE"
 
     - name: Clean temporary build directories
       if: always()
@@ -703,7 +722,7 @@ jobs:
         git commit -m "Update ${{ matrix.slot }} log for run ${{ github.run_id }}" || true
         for attempt in 1 2 3 4 5; do
           git pull --rebase origin main 2>/dev/null || true
-          git push origin main 2>/dev/null && { echo "✅ Log pushed"; break; }
+          git push origin main 2>/dev/null && { echo "Log pushed"; break; }
           sleep 5
         done
 
